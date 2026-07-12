@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Fundfakten v0.9.1</title>
+<title>Fundfakten v1.0.0</title>
 <style>
   :root{
     --bg:#0a0a0a;
@@ -136,7 +136,7 @@
 
 <header>
   <div>
-    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v0.9.1</span></h1>
+    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v1.0.0</span></h1>
     <div class="sub" id="subline">Wird geladen…</div>
   </div>
   <button class="gear" id="settingsBtn">⚙</button>
@@ -205,11 +205,16 @@ const ANTHROPIC_VERSION = "2023-06-01";
 let state = {
   groqKey: localStorage.getItem('groq_api_key') || '',
   anthropicKey: localStorage.getItem('anthropic_api_key') || '',
-  chatProvider: localStorage.getItem('chat_provider') || 'groq', // 'groq' or 'anthropic' — only affects follow-up chat
+  chatProvider: 'groq', // 'groq' or 'anthropic' — resets to groq for every fresh topic, never persisted across sessions
   lat: null, lon: null,
   context: null,        // description of current place, used for chat continuation
   systemPrompt: '',      // shared system prompt, provider-agnostic (no role:'system' baked into messages)
   messages: [],          // {role:'user'|'assistant', content} for ongoing chat, provider-agnostic
+  displayLog: [],         // {role,text} of real follow-up Q&A shown in the chat UI (excludes internal context message)
+  nearbyList: null,       // candidates from the last GPS lookup, so "back to list" doesn't re-query
+  locality: null,
+  currentTopic: null,     // name of the topic currently open, used to keep topicCache in sync
+  topicCache: {},         // name -> {context, systemPrompt, apiMessages, displayLog, badge, sourceUrl, citations, factsText}
 };
 
 const $ = id => document.getElementById(id);
@@ -351,7 +356,7 @@ function renderLocationCheck(label, acc){
       </div>
     </div>
   `;
-  $('locOk').onclick = ()=> findNearbyAndLoad();
+  $('locOk').onclick = ()=> showNearbyChoices();
   $('locWrong').onclick = ()=>{ $('manualInput').value=''; $('searchOverlay').classList.add('show'); $('manualInput').focus(); };
 }
 
@@ -362,14 +367,18 @@ function haversine(lat1,lon1,lat2,lon2){
   return 2*R*Math.asin(Math.sqrt(a));
 }
 
-async function overpassQuery(radius){
+async function overpassCandidatesQuery(radius){
   const {lat, lon} = state;
-  const q = `[out:json][timeout:15];(
+  const q = `[out:json][timeout:20];(
     nwr(around:${radius},${lat},${lon})[historic];
     nwr(around:${radius},${lat},${lon})[tourism~"attraction|museum|artwork|viewpoint|gallery"];
     nwr(around:${radius},${lat},${lon})[amenity=place_of_worship];
     nwr(around:${radius},${lat},${lon})[building~"church|cathedral|chapel|castle|palace|monastery"];
     nwr(around:${radius},${lat},${lon})[man_made=tower];
+    nwr(around:${radius},${lat},${lon})[amenity~"restaurant|cafe|bar|pub"];
+    nwr(around:${radius},${lat},${lon})[shop~"bakery|pastry"];
+    nwr(around:${radius},${lat},${lon})[natural~"bay|beach"];
+    nwr(around:${radius},${lat},${lon})[leisure=beach_resort];
   );out center tags;`;
   const res = await fetch('https://overpass-api.de/api/interpreter', {
     method:'POST', body:'data=' + encodeURIComponent(q),
@@ -379,19 +388,44 @@ async function overpassQuery(radius){
   return res.json();
 }
 
-function pickBest(elements){
+function iconForCandidate(tags){
+  if(tags.amenity==='restaurant') return '🍽️';
+  if(tags.amenity==='cafe') return '☕';
+  if(tags.amenity==='bar'||tags.amenity==='pub') return '🍷';
+  if(tags.shop==='bakery'||tags.shop==='pastry') return '🥐';
+  if(tags.natural==='bay'||tags.natural==='beach'||tags.leisure==='beach_resort') return '🏖️';
+  if(tags.amenity==='place_of_worship'||/church|cathedral|chapel|monastery/.test(tags.building||'')) return '⛪';
+  if(/castle|palace/.test(tags.building||'')) return '🏰';
+  if(tags.man_made==='tower') return '🗼';
+  if(tags.historic) return '🏛️';
+  return '📍';
+}
+
+function kindLabel(tags){
+  return tags.historic || tags.tourism || tags.amenity || tags.shop || tags.building || tags.man_made || tags.natural || tags.leisure || '';
+}
+
+// Collects multiple named nearby candidates (not just the single nearest one),
+// deduped by name, sorted by distance, capped to a reasonable list length.
+async function collectNearbyCandidates(){
   const {lat, lon} = state;
-  let best = null, bestD = Infinity;
-  for(const el of elements){
-    const tags = el.tags || {};
-    if(!tags.name) continue;
-    const elat = el.lat ?? el.center?.lat;
-    const elon = el.lon ?? el.center?.lon;
-    if(elat==null || elon==null) continue;
-    const d = haversine(lat, lon, elat, elon);
-    if(d < bestD){ bestD = d; best = {tags, d}; }
+  const seen = new Map();
+  for(const radius of [150, 400, 900]){
+    const data = await overpassCandidatesQuery(radius);
+    for(const el of (data.elements || [])){
+      const tags = el.tags || {};
+      if(!tags.name) continue;
+      const elat = el.lat ?? el.center?.lat;
+      const elon = el.lon ?? el.center?.lon;
+      if(elat==null || elon==null) continue;
+      const d = haversine(lat, lon, elat, elon);
+      if(!seen.has(tags.name) || seen.get(tags.name).d > d){
+        seen.set(tags.name, { name: tags.name, tags, d, icon: iconForCandidate(tags), kind: kindLabel(tags) });
+      }
+    }
+    if(seen.size >= 6) break; // enough candidates already at a smaller radius, no need to widen further
   }
-  return best;
+  return [...seen.values()].sort((a,b)=>a.d-b.d).slice(0,8);
 }
 
 async function reverseGeocode(){
@@ -660,42 +694,92 @@ function sourceBadge(sources, usedWebSearch){
   return `Quellen: ${parts.join(', ')}`;
 }
 
-async function findNearbyAndLoad(){
+async function showNearbyChoices(){
   ensureApiKey(async ()=>{
     try{
-      setStatus('Suche nach Sehenswertem in der Nähe…');
-      let best = null;
-      for(const radius of [80, 250, 600]){
-        const data = await overpassQuery(radius);
-        best = pickBest(data.elements || []);
-        if(best) break;
-      }
-      // Always resolve a locality string (city/region/country) to disambiguate
-      // names that also exist elsewhere in the world — without this, the model has
-      // been mixing up e.g. a Portuguese building with a same-named place in Brazil.
+      setStatus('Suche nach Interessantem in der Nähe…');
+      const candidates = await collectNearbyCandidates();
       const locality = localityString();
+      state.nearbyList = candidates;
+      state.locality = locality;
 
-      let contextText;
-      if(best){
-        const t = best.tags;
-        const kind = t.historic || t.tourism || t.amenity || t.building || t.man_made || '';
-        contextText = `Ort/Bauwerk: "${t.name}". Typ: ${kind}. Entfernung: ~${Math.round(best.d)}m vom Nutzer.`;
-        contextText += ` WICHTIG — genauer Standort laut GPS: ${locality || (state.lat.toFixed(5)+', '+state.lon.toFixed(5))}. Beziehe dich ausschließlich auf das Bauwerk mit diesem Namen an genau diesem Ort — falls der Name auch anderswo auf der Welt existiert (z.B. gleichnamiges Gebäude in einem anderen Land), ignoriere das und sag im Zweifel lieber, dass du zu diesem konkreten Ort nicht genug weißt, statt Fakten über den falschen Ort zu geben.`;
-        if(t['name:etymology']) contextText += ` Namensherkunft-Hinweis: ${t['name:etymology']}.`;
-        if(t.start_date) contextText += ` Baujahr/Datum laut OSM: ${t.start_date}.`;
-        subline.textContent = t.name;
-        await generateFacts(contextText, t.name, locality);
-      } else {
-        setStatus('Kein markantes Gebäude in der Nähe gefunden — ermittle Adresse…');
+      if(!candidates.length){
+        // Nothing named nearby at all — skip the list, go straight to the address fallback.
+        setStatus('Nichts Markantes in der Nähe gefunden — ermittle Adresse…');
         const addr = state.addressLabel || (await reverseGeocode()).display_name || 'unbekannter Ort';
-        contextText = `Der Nutzer steht an folgender Adresse (kein spezifisches Baudenkmal in OSM gefunden): ${addr}. Koordinaten: ${state.lat.toFixed(5)}, ${state.lon.toFixed(5)}. Gib Fun Facts zu dieser Gegend/Straße/diesem Viertel, falls möglich, sonst zur nächstgrößeren Stadt. Beziehe dich nur auf diesen konkreten Ort, nicht auf gleichnamige Orte anderswo.`;
-        subline.textContent = state.addressDetails?.city || state.addressDetails?.town || state.addressDetails?.village || 'In der Nähe';
-        await generateFacts(contextText, subline.textContent, locality);
+        const contextText = `Der Nutzer steht an folgender Adresse (kein spezifisches Baudenkmal in OSM gefunden): ${addr}. Koordinaten: ${state.lat.toFixed(5)}, ${state.lon.toFixed(5)}. Gib Fun Facts zu dieser Gegend/Straße/diesem Viertel, falls möglich, sonst zur nächstgrößeren Stadt. Beziehe dich nur auf diesen konkreten Ort, nicht auf gleichnamige Orte anderswo.`;
+        const title = state.addressDetails?.city || state.addressDetails?.town || state.addressDetails?.village || 'In der Nähe';
+        subline.textContent = title;
+        await generateFacts(contextText, title, locality);
+        return;
       }
+      renderTopicList();
     }catch(err){
-      setStatus('Fehler bei der Standortsuche: ' + err.message + '. Versuch es mit Foto oder manueller Eingabe.', false);
+      setStatus('Fehler bei der Suche in der Nähe: ' + err.message + '. Versuch es mit Foto oder manueller Eingabe.', false);
     }
   });
+}
+
+function renderTopicList(){
+  hideStatus();
+  const rows = state.nearbyList.map(c => {
+    const cached = state.topicCache[c.name];
+    const distLabel = c.d < 1000 ? `${Math.round(c.d)} m` : `${(c.d/1000).toFixed(1)} km`;
+    return `<div class="topic-row" data-name="${c.name.replace(/"/g,'&quot;')}" style="display:flex; align-items:center; gap:12px; padding:12px 4px; border-bottom:1px solid var(--line); cursor:pointer;">
+      <span style="font-size:22px;">${c.icon}</span>
+      <div style="flex:1;">
+        <div style="font-size:14.5px; color:var(--ink);">${c.name}${cached ? ' <span style=\"color:var(--gold2); font-size:11px;\">· schon abgefragt</span>' : ''}</div>
+        <div style="font-size:11.5px; color:var(--muted);">${c.kind} · ${distLabel}</div>
+      </div>
+      <span style="color:var(--muted);">›</span>
+    </div>`;
+  }).join('');
+
+  main.innerHTML = `
+    <div class="plaque">
+      <div class="eyebrow">In der Nähe</div>
+      <h2>Worüber möchtest du mehr wissen?</h2>
+      <div class="meta">${state.locality || ''}</div>
+      <div style="margin-top:10px;">${rows}</div>
+    </div>
+  `;
+  main.querySelectorAll('.topic-row').forEach(row=>{
+    row.onclick = ()=> selectTopic(row.getAttribute('data-name'));
+  });
+}
+
+async function selectTopic(name){
+  const candidate = state.nearbyList.find(c => c.name === name);
+  if(!candidate) return;
+
+  // Every fresh topic selection starts on Groq by default — never inherits a
+  // Claude toggle from a previous topic or an earlier session.
+  state.chatProvider = 'groq';
+
+  const cached = state.topicCache[name];
+  if(cached){
+    // Restore the exact previous conversation instead of re-fetching (saves cost
+    // and lets the user pick up follow-ups on a topic they already explored).
+    state.context = cached.context;
+    state.systemPrompt = cached.systemPrompt;
+    state.messages = cached.apiMessages;
+    state.displayLog = cached.displayLog;
+    state.currentTopic = name;
+    subline.textContent = name;
+    renderPlaque(name, cached.factsText, cached.badge, cached.sourceUrl, cached.citations, true);
+    (cached.displayLog || []).forEach(m => appendChatMsg(m.role, m.text));
+    enableChat();
+    return;
+  }
+
+  const t = candidate.tags;
+  const locality = state.locality;
+  let contextText = `Ort/Bauwerk: "${candidate.name}". Typ: ${candidate.kind}. Entfernung: ~${Math.round(candidate.d)}m vom Nutzer.`;
+  contextText += ` WICHTIG — genauer Standort laut GPS: ${locality || (state.lat.toFixed(5)+', '+state.lon.toFixed(5))}. Beziehe dich ausschließlich auf das Bauwerk/den Ort mit diesem Namen an genau diesem Ort — falls der Name auch anderswo auf der Welt existiert, ignoriere das und sag im Zweifel lieber, dass du zu diesem konkreten Ort nicht genug weißt, statt Fakten über den falschen Ort zu geben.`;
+  if(t['name:etymology']) contextText += ` Namensherkunft-Hinweis: ${t['name:etymology']}.`;
+  if(t.start_date) contextText += ` Baujahr/Datum laut OSM: ${t.start_date}.`;
+  subline.textContent = candidate.name;
+  await generateFacts(contextText, candidate.name, locality);
 }
 
 function localityString(){
@@ -757,6 +841,7 @@ async function loadFactsFromPhoto(file){
 
 async function generateFacts(contextText, title, localityHint){
   try{
+    state.chatProvider = 'groq'; // every freshly generated topic starts on Groq, never inherits a prior Claude toggle
     setStatus('Suche nach verlässlichen Quellen (Wikipedia, Wikidata, GND)…');
     const sources = await fetchGroundingSources(title, localityHint);
     const sys = groundedSystemPrompt(sources);
@@ -785,13 +870,23 @@ async function generateFacts(contextText, title, localityHint){
     const usedWebSearch = !!(msg.tool_calls?.length || msg.executed_tools?.length || data.choices[0].executed_tools?.length);
     const badge = sourceBadge(sources, usedWebSearch);
     const sourceUrl = sources?.wiki?.url || sources?.wikidata?.url || sources?.gnd?.url || null;
-    renderPlaque(title, text, badge, sourceUrl, null);
+    renderPlaque(title, text, badge, sourceUrl, null, !!state.nearbyList);
     state.context = contextText;
     state.systemPrompt = sys + '\nBeantworte Folgefragen des Nutzers dazu im gleichen Stil, streng nach denselben Quellenregeln — nichts erfinden, was nicht in der Quelle steht oder allgemein unstrittig ist. Nutze die Websuche auch hier bei Bedarf für sehr lokale Details.';
     state.messages = [
       { role:'user', content: userMsg },
       { role:'assistant', content: text }
     ];
+    state.displayLog = [];
+    state.currentTopic = title;
+    state.topicCache[title] = {
+      context: contextText,
+      systemPrompt: state.systemPrompt,
+      apiMessages: state.messages,
+      displayLog: state.displayLog,
+      badge, sourceUrl, citations: null,
+      factsText: text
+    };
     enableChat();
   }catch(err){
     setStatus('Fehler beim Abrufen der Fun Facts: ' + err.message, false);
@@ -802,12 +897,16 @@ function factsToHtml(text){
   return text.split(/\n+/).filter(p=>p.trim()).map(p=>`<p>${p.trim()}</p>`).join('');
 }
 
-function renderPlaque(title, text, eyebrow, sourceUrl, citations){
+function renderPlaque(title, text, eyebrow, sourceUrl, citations, showBackButton){
   hideStatus();
   const citationsHtml = (citations && citations.length)
     ? `<div class="meta" style="margin-top:12px;">Websuche-Quellen: ${citations.map(c=>`<a href="${c.url}" target="_blank" rel="noopener" style="color:var(--gold2);">${(c.title||c.url).slice(0,40)}</a>`).join(' · ')}</div>`
     : '';
+  const backHtml = (showBackButton && state.nearbyList)
+    ? `<button id="backToList" style="background:none; border:1px solid var(--line); color:var(--gold2); border-radius:8px; padding:6px 12px; font-size:12px; cursor:pointer; margin-bottom:10px;">‹ Andere Orte in der Nähe</button>`
+    : '';
   main.innerHTML = `
+    ${backHtml}
     <div class="plaque">
       <div class="eyebrow">${eyebrow}${sourceUrl ? ` · <a href="${sourceUrl}" target="_blank" rel="noopener" style="color:var(--gold2);">Quelle ansehen</a>` : ''}</div>
       <h2>${title}</h2>
@@ -817,6 +916,9 @@ function renderPlaque(title, text, eyebrow, sourceUrl, citations){
     </div>
     <div class="chat" id="chatLog"></div>
   `;
+  if(showBackButton && state.nearbyList){
+    $('backToList').onclick = ()=> renderTopicList();
+  }
 }
 
 function enableChat(){
@@ -892,20 +994,25 @@ async function sendFollowUp(){
   sendBtn.disabled = true;
   appendChatMsg('user', q);
   state.messages.push({role:'user', content:q});
+  state.displayLog.push({role:'user', text:q});
   try{
     const answer = state.chatProvider === 'anthropic' ? await callAnthropicChat() : await callGroqChat();
     state.messages.push({role:'assistant', content:answer});
+    state.displayLog.push({role:'assistant', text:answer});
     appendChatMsg('assistant', answer);
   }catch(err){
     appendChatMsg('assistant', 'Fehler: ' + err.message);
   }finally{
     sendBtn.disabled = false;
+    if(state.currentTopic && state.topicCache[state.currentTopic]){
+      state.topicCache[state.currentTopic].apiMessages = state.messages;
+      state.topicCache[state.currentTopic].displayLog = state.displayLog;
+    }
   }
 }
 
 function setChatProvider(p){
   state.chatProvider = p;
-  localStorage.setItem('chat_provider', p);
   const groqBtn = $('provGroq'), claudeBtn = $('provClaude');
   if(groqBtn && claudeBtn){
     groqBtn.style.background = p==='groq' ? 'var(--gold)' : 'var(--panel)';
