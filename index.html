@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Fundfakten v0.3.0</title>
+<title>Fundfakten v0.3.1</title>
 <style>
   :root{
     --bg:#0a0a0a;
@@ -136,7 +136,7 @@
 
 <header>
   <div>
-    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v0.3.0</span></h1>
+    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v0.3.1</span></h1>
     <div class="sub" id="subline">Wird geladen…</div>
   </div>
   <button class="gear" id="settingsBtn">⚙</button>
@@ -207,15 +207,19 @@ let state = {
 };
 
 const $ = id => document.getElementById(id);
-const main = $('main'), statusBox = $('statusBox'), statusText = $('statusText'), subline = $('subline');
+const main = $('main'), subline = $('subline');
 const askInput = $('askInput'), sendBtn = $('sendBtn');
 
+// IMPORTANT: main.innerHTML gets fully replaced by renderPlaque()/renderLocationCheck().
+// setStatus/hideStatus must never cache references to nodes inside #main from a
+// previous render — those become detached and invisible. Always rebuild fresh.
 function setStatus(text, spinning=true){
-  statusBox.style.display='flex';
-  statusText.textContent = text;
-  statusBox.querySelector('.spinner').style.display = spinning ? 'block' : 'none';
+  main.innerHTML = `<div class="status" id="statusBox">
+    <div class="spinner" style="display:${spinning ? 'block' : 'none'}"></div>
+    <span id="statusText">${text}</span>
+  </div>`;
 }
-function hideStatus(){ statusBox.style.display='none'; }
+function hideStatus(){ /* renderPlaque/renderLocationCheck overwrite main directly, nothing to do */ }
 
 function ensureApiKey(cb){
   if(state.apiKey){ cb(); return; }
