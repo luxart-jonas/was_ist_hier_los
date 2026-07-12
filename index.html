@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Fundfakten v1.2.1</title>
+<title>Fundfakten v1.3.0</title>
 <style>
   :root{
     --bg:#0a0a0a;
@@ -138,7 +138,7 @@
 
 <header>
   <div>
-    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v1.2.1</span></h1>
+    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v1.3.0</span></h1>
     <div class="sub" id="subline">Wird geladen…</div>
   </div>
   <button class="gear" id="settingsBtn">⚙</button>
@@ -346,6 +346,7 @@ async function confirmLocation(acc){
 
 function renderLocationCheck(label, acc){
   hideStatus();
+  stopSpeech();
   main.innerHTML = `
     <div class="plaque">
       <div class="eyebrow">Standort prüfen</div>
@@ -769,6 +770,7 @@ function renderCandidateRow(c){
 
 function renderTopicList(){
   hideStatus();
+  stopSpeech();
   const list = state.nearbyList;
   const groupsHtml = [];
   const used = new Set();
@@ -1005,8 +1007,50 @@ function factsToHtml(text){
   return text.split(/\n+/).filter(p=>p.trim()).map(p=>`<p>${p.trim()}</p>`).join('');
 }
 
+// ---------- Read-aloud (Web Speech API, built into the browser, no API cost) ----------
+let currentSpeakBtn = null;
+
+function pickGermanVoice(){
+  const voices = window.speechSynthesis.getVoices();
+  return voices.find(v => v.lang && v.lang.startsWith('de')) || null;
+}
+
+function resetSpeakBtn(btn){
+  if(btn){ btn.textContent = '🔊'; btn.setAttribute('aria-label','Vorlesen'); }
+}
+
+function toggleSpeak(text, btn){
+  if(!('speechSynthesis' in window)){
+    btn.textContent = '⚠️';
+    return;
+  }
+  const isThisSpeaking = window.speechSynthesis.speaking && currentSpeakBtn === btn;
+  window.speechSynthesis.cancel(); // stop whatever else might be playing
+  if(currentSpeakBtn) resetSpeakBtn(currentSpeakBtn);
+  if(isThisSpeaking){
+    currentSpeakBtn = null;
+    return;
+  }
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.lang = 'de-DE';
+  const voice = pickGermanVoice();
+  if(voice) utter.voice = voice;
+  utter.onend = ()=>{ resetSpeakBtn(btn); currentSpeakBtn = null; };
+  utter.onerror = ()=>{ resetSpeakBtn(btn); currentSpeakBtn = null; };
+  window.speechSynthesis.speak(utter);
+  btn.textContent = '⏹️';
+  currentSpeakBtn = btn;
+}
+
+function stopSpeech(){
+  if('speechSynthesis' in window) window.speechSynthesis.cancel();
+  if(currentSpeakBtn) resetSpeakBtn(currentSpeakBtn);
+  currentSpeakBtn = null;
+}
+
 function renderPlaque(title, text, eyebrow, sourceUrl, citations, showBackButton){
   hideStatus();
+  stopSpeech(); // never keep reading a topic we're navigating away from
   const citationsHtml = (citations && citations.length)
     ? `<div class="meta" style="margin-top:12px;">Websuche-Quellen: ${citations.map(c=>`<a href="${c.url}" target="_blank" rel="noopener" style="color:var(--gold2);">${(c.title||c.url).slice(0,40)}</a>`).join(' · ')}</div>`
     : '';
@@ -1017,13 +1061,17 @@ function renderPlaque(title, text, eyebrow, sourceUrl, citations, showBackButton
     ${backHtml}
     <div class="plaque">
       <div class="eyebrow">${eyebrow}${sourceUrl ? ` · <a href="${sourceUrl}" target="_blank" rel="noopener" style="color:var(--gold2);">Quelle ansehen</a>` : ''}</div>
-      <h2>${title}</h2>
+      <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:10px;">
+        <h2 style="margin:0;">${title}</h2>
+        <button id="speakMain" title="Vorlesen" style="flex:none; background:var(--panel); border:1px solid var(--line); color:var(--gold2); border-radius:8px; width:36px; height:36px; font-size:16px; cursor:pointer;">🔊</button>
+      </div>
       <div class="meta">${new Date().toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>
       <div class="facts">${factsToHtml(text)}</div>
       ${citationsHtml}
     </div>
     <div class="chat" id="chatLog"></div>
   `;
+  $('speakMain').onclick = ()=> toggleSpeak(text, $('speakMain'));
   if(showBackButton && state.nearbyList){
     $('backToList').onclick = ()=> renderTopicList();
   }
@@ -1045,7 +1093,19 @@ function appendChatMsg(role, text){
   }
   const div = document.createElement('div');
   div.className = 'msg ' + (role==='user' ? 'user' : 'assistant');
-  div.textContent = text;
+  if(role === 'assistant'){
+    const textSpan = document.createElement('span');
+    textSpan.textContent = text;
+    const speakBtn = document.createElement('button');
+    speakBtn.textContent = '🔊';
+    speakBtn.title = 'Vorlesen';
+    speakBtn.style.cssText = 'background:none; border:none; color:var(--gold2); cursor:pointer; font-size:13px; margin-left:8px; vertical-align:middle;';
+    speakBtn.onclick = ()=> toggleSpeak(text, speakBtn);
+    div.appendChild(textSpan);
+    div.appendChild(speakBtn);
+  } else {
+    div.textContent = text;
+  }
   log.appendChild(div);
   main.scrollTop = main.scrollHeight;
 }
