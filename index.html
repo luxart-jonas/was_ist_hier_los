@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Fundfakten v0.5.0</title>
+<title>Fundfakten v0.9.0</title>
 <style>
   :root{
     --bg:#0a0a0a;
@@ -136,7 +136,7 @@
 
 <header>
   <div>
-    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v0.5.0</span></h1>
+    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v0.9.0</span></h1>
     <div class="sub" id="subline">Wird geladen…</div>
   </div>
   <button class="gear" id="settingsBtn">⚙</button>
@@ -149,6 +149,11 @@
   </div>
 </main>
 
+<div id="providerToggle" style="display:none; align-items:center; gap:6px; padding:6px 12px 0; font-size:11px; color:var(--muted);">
+  Antwort via:
+  <button id="provGroq" style="border:1px solid var(--line); border-radius:20px; padding:3px 10px; font-size:11px; cursor:pointer; background:var(--gold); color:#141311;">Groq</button>
+  <button id="provClaude" style="border:1px solid var(--line); border-radius:20px; padding:3px 10px; font-size:11px; cursor:pointer; background:var(--panel); color:var(--muted);">Claude</button>
+</div>
 <footer>
   <button class="icon-btn" id="photoBtn" title="Foto">📷</button>
   <button class="icon-btn" id="searchBtn" title="Manuell suchen">🔍</button>
@@ -161,9 +166,12 @@
 <!-- Settings sheet -->
 <div class="overlay" id="settingsOverlay">
   <div class="sheet">
-    <h3>Groq API-Key</h3>
-    <div class="hint">Wird nur lokal auf diesem Gerät gespeichert (localStorage). Key von console.groq.com/keys.</div>
-    <input type="password" id="apiKeyInput" placeholder="gsk_...">
+    <h3>API-Keys</h3>
+    <div class="hint">Werden nur lokal auf diesem Gerät gespeichert (localStorage).</div>
+    <div class="hint" style="margin-bottom:4px; color:var(--gold2);">Groq (Pflicht — für die erste Fun-Facts-Anfrage)</div>
+    <input type="password" id="groqKeyInput" placeholder="gsk_... (console.groq.com/keys)">
+    <div class="hint" style="margin-bottom:4px; color:var(--gold2);">Anthropic (optional — nur falls du bei Nachfragen auf Claude umschaltest)</div>
+    <input type="password" id="anthropicKeyInput" placeholder="sk-ant-... (console.anthropic.com)">
     <div class="row">
       <button class="secondary" id="settingsCancel">Abbrechen</button>
       <button class="primary" id="settingsSave">Speichern</button>
@@ -184,15 +192,24 @@
 </div>
 
 <script>
-const TEXT_MODEL = "openai/gpt-oss-120b";
-const VISION_MODEL = "qwen/qwen3.6-27b";
+// Initial fun-facts request (location/manual/photo) always uses Groq — cheap/free tier.
+// Follow-up chat defaults to Groq too, but can be switched to Anthropic per the toggle in the UI.
+const GROQ_TEXT_MODEL = "openai/gpt-oss-120b";
+const GROQ_VISION_MODEL = "qwen/qwen3.6-27b";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
+const ANTHROPIC_TEXT_MODEL = "claude-sonnet-5";
+const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_VERSION = "2023-06-01";
+
 let state = {
-  apiKey: localStorage.getItem('groq_api_key') || '',
+  groqKey: localStorage.getItem('groq_api_key') || '',
+  anthropicKey: localStorage.getItem('anthropic_api_key') || '',
+  chatProvider: localStorage.getItem('chat_provider') || 'groq', // 'groq' or 'anthropic' — only affects follow-up chat
   lat: null, lon: null,
   context: null,        // description of current place, used for chat continuation
-  messages: [],         // {role, content} for ongoing chat
+  systemPrompt: '',      // shared system prompt, provider-agnostic (no role:'system' baked into messages)
+  messages: [],          // {role:'user'|'assistant', content} for ongoing chat, provider-agnostic
 };
 
 const $ = id => document.getElementById(id);
@@ -210,26 +227,33 @@ function setStatus(text, spinning=true){
 }
 function hideStatus(){ /* renderPlaque/renderLocationCheck overwrite main directly, nothing to do */ }
 
+// The initial fun-facts request (GPS/manual/photo) always runs on Groq (cheap/free tier),
+// so this only needs to check the Groq key.
 function ensureApiKey(cb){
-  if(state.apiKey){ cb(); return; }
+  if(state.groqKey){ cb(); return; }
   openSettings();
   setStatus('Bitte zuerst Groq API-Key eintragen (⚙ oben rechts).', false);
 }
 
 // ---------- Settings sheet ----------
 function openSettings(){
-  $('apiKeyInput').value = state.apiKey;
+  $('groqKeyInput').value = state.groqKey;
+  $('anthropicKeyInput').value = state.anthropicKey;
   $('settingsOverlay').classList.add('show');
 }
 $('settingsBtn').onclick = openSettings;
 $('settingsCancel').onclick = ()=> $('settingsOverlay').classList.remove('show');
 $('settingsSave').onclick = ()=>{
-  const v = $('apiKeyInput').value.trim();
-  state.apiKey = v;
-  localStorage.setItem('groq_api_key', v);
+  const g = $('groqKeyInput').value.trim();
+  const a = $('anthropicKeyInput').value.trim();
+  state.groqKey = g;
+  state.anthropicKey = a;
+  localStorage.setItem('groq_api_key', g);
+  localStorage.setItem('anthropic_api_key', a);
   $('settingsOverlay').classList.remove('show');
-  if(v && !state.context) init();
+  if(g && !state.context) init();
 };
+
 
 // ---------- Manual search sheet ----------
 $('searchBtn').onclick = ()=>{ $('manualInput').value=''; $('searchOverlay').classList.add('show'); $('manualInput').focus(); };
@@ -250,7 +274,7 @@ $('fileInput').onchange = (e)=>{
   e.target.value = '';
 };
 
-// ---------- Init: geolocation -> Overpass -> Groq ----------
+// ---------- Init: geolocation -> Overpass -> Claude ----------
 function init(){
   if(!navigator.geolocation){
     setStatus('Geolocation wird von diesem Browser nicht unterstützt. Nutze Foto oder manuelle Eingabe.', false);
@@ -378,8 +402,8 @@ async function reverseGeocode(){
 }
 
 // ---------- Wikipedia grounding ----------
-// Groq's raw "knowledge" hallucinates confidently on smaller/lesser-known places
-// (confirmed: completely made-up facts about Rösrath). So before asking Groq for
+// The model's raw "knowledge" hallucinates confidently on smaller/lesser-known places
+// (confirmed: completely made-up facts about Rösrath). So before asking the model for
 // fun facts, we try to pull a real Wikipedia summary and force the model to only
 // draw from that text. If nothing is found, the model must say so instead of
 // inventing specifics.
@@ -450,30 +474,190 @@ async function fetchWikiContext(name, localityHint){
   return null;
 }
 
-function groundedSystemPrompt(wiki){
+// ---------- Wikidata: structured facts (dates, population, architect, heritage status...) ----------
+const WIKIDATA_PROPS = {
+  P571: 'Gründungs-/Errichtungsdatum',
+  P576: 'Auflösungsdatum',
+  P17:  'Land',
+  P131: 'Verwaltungseinheit',
+  P1082:'Einwohnerzahl',
+  P84:  'Architekt',
+  P149: 'Baustil',
+  P138: 'Benannt nach',
+  P2044:'Höhe',
+  P1435:'Denkmalschutz-Status',
+  P112: 'Gegründet von',
+  P159: 'Sitz',
+  P206: 'Gewässer in der Nähe',
+};
+
+function formatWikidataDate(t){
+  const m = /^([+-])(\d+)-(\d\d)-(\d\d)/.exec(t);
+  if(!m) return t;
+  const [,,y,mo,d] = m;
+  if(mo==='00' && d==='00') return y;
+  return `${d}.${mo}.${y}`;
+}
+
+async function fetchWikidataFacts(lang, wikiTitle){
+  try{
+    const ppUrl = `https://${lang}.wikipedia.org/w/api.php?action=query&prop=pageprops&titles=${encodeURIComponent(wikiTitle)}&format=json&origin=*&ppprop=wikibase_item`;
+    const ppData = await (await fetch(ppUrl)).json();
+    const page = Object.values(ppData.query?.pages || {})[0];
+    const qid = page?.pageprops?.wikibase_item;
+    if(!qid) return null;
+
+    const entUrl = `https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${qid}&format=json&origin=*&props=claims|descriptions&languages=de|en`;
+    const entData = await (await fetch(entUrl)).json();
+    const entity = entData.entities?.[qid];
+    if(!entity) return null;
+
+    const claims = entity.claims || {};
+    const refIds = new Set();
+    const raw = [];
+    for(const [pid,label] of Object.entries(WIKIDATA_PROPS)){
+      const stmts = claims[pid];
+      if(!stmts || !stmts.length) continue;
+      for(const s of stmts.slice(0,2)){
+        const val = s.mainsnak?.datavalue?.value;
+        if(val == null) continue;
+        if(val.id){ refIds.add(val.id); raw.push({label, ref:val.id}); }
+        else if(val.time){ raw.push({label, text: formatWikidataDate(val.time)}); }
+        else if(val.amount){ raw.push({label, text: String(val.amount).replace('+','')}); }
+        else if(typeof val === 'string'){ raw.push({label, text: val}); }
+      }
+    }
+    let idLabels = {};
+    if(refIds.size){
+      const ids = [...refIds].slice(0,40).join('|');
+      const labData = await (await fetch(`https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${ids}&format=json&origin=*&props=labels&languages=de|en`)).json();
+      for(const [id,e] of Object.entries(labData.entities || {})){
+        idLabels[id] = e.labels?.de?.value || e.labels?.en?.value || id;
+      }
+    }
+    const lines = raw.map(f => f.ref ? `${f.label}: ${idLabels[f.ref] || f.ref}` : `${f.label}: ${f.text}`);
+    if(!lines.length) return null;
+    return { facts: lines, url: `https://www.wikidata.org/wiki/${qid}` };
+  }catch(e){ return null; }
+}
+
+// ---------- GND via lobid.org: official German authority data (historical names, dates) ----------
+async function fetchGndFacts(name, localityHint){
+  try{
+    const q = localityHint ? `${name} ${localityHint.split(',')[0]}` : name;
+    const url = `https://lobid.org/gnd/search?q=${encodeURIComponent(q)}&format=json&size=1`;
+    const data = await (await fetch(url)).json();
+    const m = data.member?.[0];
+    if(!m) return null;
+    const lines = [];
+    if(m.dateOfEstablishment) lines.push(`Gründungsdatum (GND): ${[].concat(m.dateOfEstablishment).join(', ')}`);
+    if(m.dateOfTermination) lines.push(`Auflösungs-/Enddatum (GND): ${[].concat(m.dateOfTermination).join(', ')}`);
+    if(m.variantName) lines.push(`Historische/alternative Namen (GND): ${[].concat(m.variantName).slice(0,5).join(', ')}`);
+    if(m.definition) lines.push(`Beschreibung (GND): ${[].concat(m.definition).join(' ')}`);
+    if(m.hierarchicalSuperiorOfPlaceOrGeographicName){
+      const parents = [].concat(m.hierarchicalSuperiorOfPlaceOrGeographicName).map(p=>p.label).filter(Boolean);
+      if(parents.length) lines.push(`Übergeordnete Verwaltungseinheit (GND): ${parents.join(', ')}`);
+    }
+    if(!lines.length) return null;
+    return { facts: lines, url: m.id || null };
+  }catch(e){ return null; }
+}
+
+// Combines Wikipedia (full text), Wikidata (structured facts) and GND (official
+// authority data) into one grounding package. Any of the three can be missing —
+// the prompt only claims what's actually present.
+async function fetchGroundingSources(name, localityHint){
+  const wiki = await fetchWikiContext(name, localityHint);
+  const [wikidata, gnd] = await Promise.all([
+    wiki ? fetchWikidataFacts(wiki.lang, wiki.title) : Promise.resolve(null),
+    fetchGndFacts(name, localityHint)
+  ]);
+  if(!wiki && !wikidata && !gnd) return null;
+  return { wiki, wikidata, gnd };
+}
+
+function groundedSystemPrompt(sources){
   const base = `Du bist ein kenntnisreicher, lebendiger Reisebegleiter für historische Fun Facts. Antworte immer auf Deutsch.
-Stil: modern, lebendig, seriös - keine trockenen Lexikon-Einträge, sondern überraschende, einprägsame Details. Kurz und
-prägnant, ein Fact pro Absatz, keine Emojis, keine nummerierten Listen, keine Überschriften.
+Stil: modern, lebendig, seriös - keine trockenen Lexikon-Einträge, sondern überraschende, einprägsame Details. Keine
+Emojis, keine nummerierten Listen, keine Überschriften.
 Namen von Gebäuden/Orten sind oft nicht eindeutig — dasselbe Wort kann in mehreren Ländern vorkommen (z.B. gleichnamige
 Gebäude in Portugal und Brasilien). Nutze immer die mitgelieferte Stadt/Land-Angabe, um den richtigen Ort zu identifizieren,
-und beziehe dich NIE auf einen gleichnamigen Ort woanders.`;
+und beziehe dich NIE auf einen gleichnamigen Ort woanders.
 
-  if(wiki){
-    return base + `\n\nKRITISCH — Quellenbindung: Dir liegt unten ein vollständiger Wikipedia-Artikel(auszug) zu genau
-diesem Ort vor, inklusive Abschnitten wie Geschichte, Namensherkunft, Bauwerke etc. Nutze AUSSCHLIESSLICH diesen Text
-als Faktenquelle (in eigenen Worten umformuliert, nicht wörtlich zitiert) — durchsuche ihn ruhig ganz, nicht nur den
-ersten Absatz, gerade Geschichts-Abschnitte liefern oft die interessantesten Details. Ergänze höchstens sehr allgemeines,
-unstrittiges Kontextwissen (z.B. grobe Epochen-Einordnung), aber KEINE eigenen spezifischen Details (Jahreszahlen, Namen,
-Ereignisse), die nicht im Text stehen — auch wenn du glaubst, etwas über einen ähnlich klingenden Ort zu wissen. Gib
-4-6 Fun Facts, wenn der Text das hergibt (weniger nur, wenn der Text wirklich zu dünn ist) — bevorzuge dabei überraschende,
-wenig offensichtliche Details gegenüber generischen Basisfakten wie reiner Einwohnerzahl.`;
+Du hast außerdem Zugriff auf ein Websuche-Tool (web_search). Wikipedia/Wikidata/GND decken nur enzyklopädisch
+relevante Orte/Gebäude ab — für sehr lokale Dinge (ein Restaurant, ein Laden, eine Person mit einer ungewöhnlichen
+Lebensgeschichte, die vor Ort bekannt ist, ein lokales Gerücht/Ereignis) gibt es dort naturgemäß nichts. Nutze die
+Websuche gezielt, wenn der genannte Ort/Name nach einem Geschäft, Restaurant, einer Person oder einem sehr lokalen
+Phänomen klingt und die mitgelieferten Quellen dazu nichts hergeben. Erwähne den Suchvorgang selbst NICHT im Text
+("ich habe gesucht und gefunden..."), liefere nur das Endergebnis im gewohnten Fun-Fact-Stil. Auch bei Websuche gilt:
+nichts erfinden, was die Suchergebnisse nicht hergeben — wenn auch die Websuche nichts Konkretes findet, sag das ehrlich
+statt zu spekulieren.`;
+
+  if(sources && (sources.wiki || sources.wikidata || sources.gnd)){
+    const richness = (sources.wiki ? 1:0) + (sources.wikidata ? 1:0) + (sources.gnd ? 1:0);
+    const lengthGuidance = richness >= 2
+      ? `Dir liegt mehr als eine Quelle mit brauchbarem Material vor. Schöpf das aus: ziel auf ca. 2-3 Minuten Lesezeit
+(ungefähr 400-600 Wörter, mehrere Absätze), wenn das Material das wirklich hergibt — aber fülle NICHT künstlich mit
+Wiederholungen oder Allgemeinplätzen auf, wenn die Quellen dünner sind als das. Qualität und Substanz vor Zielwortzahl.`
+      : `Nur eine Quelle mit Material vorhanden — bleib bei 3-5 prägnanten Fakten, keine künstliche Streckung.`;
+
+    return base + `\n\nKRITISCH — Quellenbindung: Dir liegen unten ein oder mehrere echte Quellen zu genau diesem Ort vor
+(Wikipedia-Volltext, Wikidata-Strukturdaten und/oder GND-Normdaten). Nutze AUSSCHLIESSLICH diese Texte als Faktenquelle
+(in eigenen Worten umformuliert, nicht wörtlich zitiert) — durchsuche den Wikipedia-Text ruhig ganz, nicht nur den ersten
+Absatz, gerade Geschichts-Abschnitte liefern oft die interessantesten Details. Wikidata/GND-Angaben sind gute Anker für
+exakte Daten/Zahlen, die du in die Fließtext-Fakten einbauen kannst. Ergänze höchstens sehr allgemeines, unstrittiges
+Kontextwissen (z.B. grobe Epochen-Einordnung), aber KEINE eigenen spezifischen Details (Jahreszahlen, Namen, Ereignisse),
+die nicht in den Quellen stehen — auch wenn du glaubst, etwas über einen ähnlich klingenden Ort zu wissen.
+${lengthGuidance}
+Ein Fact/Absatz pro Absatz, aber bei längerer Ausgabe dürfen einzelne Absätze auch mal 2-3 Sätze haben statt strikt einer Zeile.`;
   }
-  return base + `\n\nKRITISCH — keine Quelle vorhanden: Für diesen Ort wurde KEINE Wikipedia-Quelle gefunden. Erfinde
-KEINE spezifischen historischen Fakten (keine Jahreszahlen, Namen, Ereignisse, Anekdoten) über diesen konkreten Ort —
-das ist die Hauptursache für frühere Fantasie-Antworten und darf nicht wieder passieren. Schreibe stattdessen ehrlich
-und knapp (2-3 Sätze), dass zu diesem genauen Ort keine gesicherten Informationen vorliegen. Du darfst höchstens ganz
-allgemeine, unstrittige Kontext-Infos zur Region/Gegend nennen, aber klar als "allgemein" kennzeichnen und nicht als
-Fun Fact über den Ort selbst verkaufen.`;
+  return base + `\n\nKRITISCH — keine Quelle vorhanden: Für diesen Ort wurde KEINE Wikipedia-, Wikidata- oder GND-Quelle
+gefunden. Erfinde KEINE spezifischen historischen Fakten (keine Jahreszahlen, Namen, Ereignisse, Anekdoten) über diesen
+konkreten Ort — das ist die Hauptursache für frühere Fantasie-Antworten und darf nicht wieder passieren. Schreibe
+stattdessen ehrlich und knapp (2-3 Sätze), dass zu diesem genauen Ort keine gesicherten Informationen vorliegen. Du
+darfst höchstens ganz allgemeine, unstrittige Kontext-Infos zur Region/Gegend nennen, aber klar als "allgemein"
+kennzeichnen und nicht als Fun Fact über den Ort selbst verkaufen.`;
+}
+
+function buildSourceUserMessage(title, contextText, sources){
+  let msg = `Ort/Bauwerk: "${title}". Zusätzlicher Kontext: ${contextText}`;
+  if(!sources) { msg += `\n\n(Keine Quellen gefunden.)`; return msg; }
+  if(sources.wiki){
+    msg += `\n\n--- Wikipedia-Auszug ("${sources.wiki.title}", ${sources.wiki.lang.toUpperCase()}) ---\n${sources.wiki.extract}`;
+  }
+  if(sources.wikidata){
+    msg += `\n\n--- Wikidata-Fakten ---\n${sources.wikidata.facts.join('\n')}`;
+  }
+  if(sources.gnd){
+    msg += `\n\n--- GND-Normdaten ---\n${sources.gnd.facts.join('\n')}`;
+  }
+  return msg;
+}
+
+function extractCitations(contentBlocks){
+  const out = [];
+  const seen = new Set();
+  for(const block of contentBlocks){
+    if(block.type === 'text' && Array.isArray(block.citations)){
+      for(const c of block.citations){
+        if(c.url && !seen.has(c.url)){
+          seen.add(c.url);
+          out.push({ url: c.url, title: c.title || c.url });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function sourceBadge(sources, usedWebSearch){
+  const parts = [];
+  if(sources?.wiki) parts.push('Wikipedia');
+  if(sources?.wikidata) parts.push('Wikidata');
+  if(sources?.gnd) parts.push('GND');
+  if(usedWebSearch) parts.push('Websuche');
+  if(!parts.length) return '⚠️ Keine Quelle gefunden — mit Vorsicht genießen';
+  return `Quellen: ${parts.join(', ')}`;
 }
 
 async function findNearbyAndLoad(){
@@ -487,7 +671,7 @@ async function findNearbyAndLoad(){
         if(best) break;
       }
       // Always resolve a locality string (city/region/country) to disambiguate
-      // names that also exist elsewhere in the world — without this, Groq has
+      // names that also exist elsewhere in the world — without this, the model has
       // been mixing up e.g. a Portuguese building with a same-named place in Brazil.
       const locality = localityString();
 
@@ -542,9 +726,9 @@ async function loadFactsFromPhoto(file){
     const dataUrl = await fileToDataURL(file);
     const res = await fetch(GROQ_URL, {
       method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer ' + state.apiKey},
+      headers:{'Content-Type':'application/json','Authorization':'Bearer ' + state.groqKey},
       body: JSON.stringify({
-        model: VISION_MODEL,
+        model: GROQ_VISION_MODEL,
         messages:[
           { role:'system', content: 'Identifiziere kurz und präzise, was auf dem Foto zu sehen ist: der Eigenname des Gebäudes/Ortes falls erkennbar, sonst eine kurze Beschreibung der Art (z.B. "gotische Dorfkirche", "Fachwerkhaus"). Antworte NUR mit diesem einen kurzen Satz auf Deutsch, ohne weitere Fakten, ohne Geschichte, ohne Spekulation.' },
           { role:'user', content:[
@@ -573,36 +757,39 @@ async function loadFactsFromPhoto(file){
 
 async function generateFacts(contextText, title, localityHint){
   try{
-    setStatus('Suche nach verlässlichen Quellen…');
-    const wiki = await fetchWikiContext(title, localityHint);
-    const sys = groundedSystemPrompt(wiki);
-    const userMsg = wiki
-      ? `Ort/Bauwerk: "${title}". Zusätzlicher Kontext: ${contextText}\n\nWikipedia-Auszug ("${wiki.title}", ${wiki.lang.toUpperCase()}):\n${wiki.extract}`
-      : `Ort/Bauwerk: "${title}". Zusätzlicher Kontext: ${contextText}\n\n(Keine Wikipedia-Quelle gefunden.)`;
+    setStatus('Suche nach verlässlichen Quellen (Wikipedia, Wikidata, GND)…');
+    const sources = await fetchGroundingSources(title, localityHint);
+    const sys = groundedSystemPrompt(sources);
+    const userMsg = buildSourceUserMessage(title, contextText, sources);
 
     setStatus('Fun Facts werden geschrieben…');
     const res = await fetch(GROQ_URL, {
       method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer ' + state.apiKey},
+      headers:{'Content-Type':'application/json','Authorization':'Bearer ' + state.groqKey},
       body: JSON.stringify({
-        model: TEXT_MODEL,
+        model: GROQ_TEXT_MODEL,
         messages:[
           { role:'system', content: sys },
           { role:'user', content: userMsg }
         ],
-        temperature:0.4
+        temperature:0.4,
+        max_tokens:1800,
+        tools:[{ type:'browser_search' }],
+        tool_choice:'auto'
       })
     });
     const data = await res.json();
     if(!res.ok) throw new Error(data.error?.message || 'Groq-Fehler');
-    const text = data.choices[0].message.content;
-    const badge = wiki
-      ? `Quelle: Wikipedia (${wiki.title})`
-      : '⚠️ Keine Quelle gefunden — mit Vorsicht genießen';
-    renderPlaque(title, text, badge, wiki?.url);
+    const msg = data.choices[0].message;
+    const text = msg.content;
+    const usedWebSearch = !!(msg.tool_calls?.length || msg.executed_tools?.length || data.choices[0].executed_tools?.length);
+    const badge = sourceBadge(sources, usedWebSearch);
+    const sourceUrl = sources?.wiki?.url || sources?.wikidata?.url || sources?.gnd?.url || null;
+    renderPlaque(title, text, badge, sourceUrl, null);
     state.context = contextText;
+    state.systemPrompt = sys + '\nBeantworte Folgefragen des Nutzers dazu im gleichen Stil, streng nach denselben Quellenregeln — nichts erfinden, was nicht in der Quelle steht oder allgemein unstrittig ist. Nutze die Websuche auch hier bei Bedarf für sehr lokale Details.';
     state.messages = [
-      { role:'system', content: sys + '\nKontext zum aktuellen Ort: ' + userMsg + '\nBeantworte Folgefragen des Nutzers dazu im gleichen Stil, streng nach denselben Quellenregeln — nichts erfinden, was nicht in der Quelle steht oder allgemein unstrittig ist.' },
+      { role:'user', content: userMsg },
       { role:'assistant', content: text }
     ];
     enableChat();
@@ -615,14 +802,18 @@ function factsToHtml(text){
   return text.split(/\n+/).filter(p=>p.trim()).map(p=>`<p>${p.trim()}</p>`).join('');
 }
 
-function renderPlaque(title, text, eyebrow, sourceUrl){
+function renderPlaque(title, text, eyebrow, sourceUrl, citations){
   hideStatus();
+  const citationsHtml = (citations && citations.length)
+    ? `<div class="meta" style="margin-top:12px;">Websuche-Quellen: ${citations.map(c=>`<a href="${c.url}" target="_blank" rel="noopener" style="color:var(--gold2);">${(c.title||c.url).slice(0,40)}</a>`).join(' · ')}</div>`
+    : '';
   main.innerHTML = `
     <div class="plaque">
       <div class="eyebrow">${eyebrow}${sourceUrl ? ` · <a href="${sourceUrl}" target="_blank" rel="noopener" style="color:var(--gold2);">Quelle ansehen</a>` : ''}</div>
       <h2>${title}</h2>
       <div class="meta">${new Date().toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>
       <div class="facts">${factsToHtml(text)}</div>
+      ${citationsHtml}
     </div>
     <div class="chat" id="chatLog"></div>
   `;
@@ -631,6 +822,8 @@ function renderPlaque(title, text, eyebrow, sourceUrl){
 function enableChat(){
   askInput.disabled = false;
   sendBtn.disabled = false;
+  $('providerToggle').style.display = 'flex';
+  setChatProvider(state.chatProvider);
   askInput.focus();
 }
 
@@ -647,22 +840,61 @@ function appendChatMsg(role, text){
   main.scrollTop = main.scrollHeight;
 }
 
+async function callGroqChat(){
+  const res = await fetch(GROQ_URL, {
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':'Bearer ' + state.groqKey},
+    body: JSON.stringify({
+      model: GROQ_TEXT_MODEL,
+      messages: [ { role:'system', content: state.systemPrompt }, ...state.messages ],
+      temperature:0.6,
+      max_tokens:1200,
+      tools:[{ type:'browser_search' }],
+      tool_choice:'auto'
+    })
+  });
+  const data = await res.json();
+  if(!res.ok) throw new Error(data.error?.message || 'Groq-Fehler');
+  return data.choices[0].message.content;
+}
+
+async function callAnthropicChat(){
+  const res = await fetch(ANTHROPIC_URL, {
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      'x-api-key': state.anthropicKey,
+      'anthropic-version': ANTHROPIC_VERSION,
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify({
+      model: ANTHROPIC_TEXT_MODEL,
+      max_tokens: 1200,
+      system: state.systemPrompt,
+      messages: state.messages,
+      temperature:0.6,
+      tools:[{ type:'web_search_20250305', name:'web_search', max_uses: 5 }]
+    })
+  });
+  const data = await res.json();
+  if(!res.ok) throw new Error(data.error?.message || 'Anthropic-Fehler');
+  return (data.content || []).filter(b=>b.type==='text').map(b=>b.text).join('\n');
+}
+
 async function sendFollowUp(){
   const q = askInput.value.trim();
-  if(!q || !state.apiKey) return;
+  if(!q) return;
+  if(state.chatProvider === 'anthropic' && !state.anthropicKey){
+    appendChatMsg('assistant', 'Für Claude fehlt noch der Anthropic API-Key (⚙ oben rechts) — oder auf Groq zurückschalten.');
+    return;
+  }
+  if(state.chatProvider === 'groq' && !state.groqKey) return;
   askInput.value = '';
   sendBtn.disabled = true;
   appendChatMsg('user', q);
   state.messages.push({role:'user', content:q});
   try{
-    const res = await fetch(GROQ_URL, {
-      method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer ' + state.apiKey},
-      body: JSON.stringify({ model: TEXT_MODEL, messages: state.messages, temperature:0.6 })
-    });
-    const data = await res.json();
-    if(!res.ok) throw new Error(data.error?.message || 'Groq-Fehler');
-    const answer = data.choices[0].message.content;
+    const answer = state.chatProvider === 'anthropic' ? await callAnthropicChat() : await callGroqChat();
     state.messages.push({role:'assistant', content:answer});
     appendChatMsg('assistant', answer);
   }catch(err){
@@ -671,7 +903,21 @@ async function sendFollowUp(){
     sendBtn.disabled = false;
   }
 }
+
+function setChatProvider(p){
+  state.chatProvider = p;
+  localStorage.setItem('chat_provider', p);
+  const groqBtn = $('provGroq'), claudeBtn = $('provClaude');
+  if(groqBtn && claudeBtn){
+    groqBtn.style.background = p==='groq' ? 'var(--gold)' : 'var(--panel)';
+    groqBtn.style.color = p==='groq' ? '#141311' : 'var(--muted)';
+    claudeBtn.style.background = p==='anthropic' ? 'var(--gold)' : 'var(--panel)';
+    claudeBtn.style.color = p==='anthropic' ? '#141311' : 'var(--muted)';
+  }
+}
 sendBtn.onclick = sendFollowUp;
+$('provGroq').onclick = ()=> setChatProvider('groq');
+$('provClaude').onclick = ()=> setChatProvider('anthropic');
 askInput.addEventListener('keydown', e=>{
   if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendFollowUp(); }
 });
@@ -682,7 +928,7 @@ askInput.addEventListener('input', ()=>{
 
 // ---------- Boot ----------
 main.innerHTML = `<div class="status" id="statusBox"><div class="spinner"></div><span id="statusText">Standort wird ermittelt…</span></div>`;
-if(!state.apiKey){
+if(!state.groqKey){
   openSettings();
   setStatus('Bitte zuerst Groq API-Key eintragen (⚙ oben rechts).', false);
 } else {
