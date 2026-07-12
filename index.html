@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Fundfakten v0.3.1</title>
+<title>Fundfakten v0.4.0</title>
 <style>
   :root{
     --bg:#0a0a0a;
@@ -136,7 +136,7 @@
 
 <header>
   <div>
-    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v0.3.1</span></h1>
+    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v0.4.0</span></h1>
     <div class="sub" id="subline">Wird geladen…</div>
   </div>
   <button class="gear" id="settingsBtn">⚙</button>
@@ -187,17 +187,6 @@
 const TEXT_MODEL = "openai/gpt-oss-120b";
 const VISION_MODEL = "qwen/qwen3.6-27b";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-
-const FACT_SYSTEM = `Du bist ein kenntnisreicher, lebendiger Reisebegleiter für historische Fun Facts.
-Antworte immer auf Deutsch. Gib 3-5 überraschende, historisch korrekte Fun Facts zum genannten Ort/Bauwerk.
-Stil: modern, lebendig, seriös und korrekt - keine trockenen Lexikon-Einträge, sondern überraschende Details,
-Anekdoten und kuriose Zahlen, die im Gedächtnis bleiben. Kurz und prägnant, ein Fact pro Absatz, keine Emojis,
-keine nummerierten Listen, keine Überschriften. Wenn du bei einem Detail unsicher bist, sag das knapp statt zu erfinden.
-KRITISCH: Namen von Gebäuden/Orten sind oft nicht eindeutig — dasselbe oder ein ähnliches Wort kann in mehreren Ländern
-vorkommen (z.B. gleichnamige Gebäude in Portugal und Brasilien). Nutze IMMER die mitgelieferte Stadt/Land-Angabe, um den
-richtigen Ort zu identifizieren. Wenn Land/Stadt nicht zu deinem Wissen über diesen Namen passt, sag lieber ehrlich,
-dass du zu diesem konkreten, lokal benannten Ort nichts Gesichertes weißt, statt Fakten über einen gleichnamigen Ort
-woanders zu liefern.`;
 
 let state = {
   apiKey: localStorage.getItem('groq_api_key') || '',
@@ -388,6 +377,81 @@ async function reverseGeocode(){
   return res.json();
 }
 
+// ---------- Wikipedia grounding ----------
+// Groq's raw "knowledge" hallucinates confidently on smaller/lesser-known places
+// (confirmed: completely made-up facts about Rösrath). So before asking Groq for
+// fun facts, we try to pull a real Wikipedia summary and force the model to only
+// draw from that text. If nothing is found, the model must say so instead of
+// inventing specifics.
+async function wikiSearch(lang, query){
+  try{
+    const url = `https://${lang}.wikipedia.org/w/api.php?action=query&list=search&format=json&origin=*&srlimit=3&srsearch=${encodeURIComponent(query)}`;
+    const res = await fetch(url);
+    if(!res.ok) return [];
+    const data = await res.json();
+    return (data.query && data.query.search) || [];
+  }catch(e){ return []; }
+}
+
+async function wikiSummary(lang, title){
+  try{
+    const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g,'_'))}`;
+    const res = await fetch(url);
+    if(!res.ok) return null;
+    const data = await res.json();
+    if(data.type === 'disambiguation') return null;
+    if(!data.extract || data.extract.length < 40) return null;
+    return data;
+  }catch(e){ return null; }
+}
+
+async function fetchWikiContext(name, localityHint){
+  const queries = [];
+  if(localityHint) queries.push(name + ' ' + localityHint.split(',')[0]);
+  queries.push(name);
+  for(const lang of ['de','en']){
+    for(const q of queries){
+      const results = await wikiSearch(lang, q);
+      for(const r of results.slice(0,2)){
+        const summary = await wikiSummary(lang, r.title);
+        if(summary){
+          return {
+            title: summary.title,
+            extract: summary.extract,
+            url: summary.content_urls?.desktop?.page || null,
+            lang
+          };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function groundedSystemPrompt(wiki){
+  const base = `Du bist ein kenntnisreicher, lebendiger Reisebegleiter für historische Fun Facts. Antworte immer auf Deutsch.
+Stil: modern, lebendig, seriös - keine trockenen Lexikon-Einträge, sondern überraschende, einprägsame Details. Kurz und
+prägnant, ein Fact pro Absatz, keine Emojis, keine nummerierten Listen, keine Überschriften.
+Namen von Gebäuden/Orten sind oft nicht eindeutig — dasselbe Wort kann in mehreren Ländern vorkommen (z.B. gleichnamige
+Gebäude in Portugal und Brasilien). Nutze immer die mitgelieferte Stadt/Land-Angabe, um den richtigen Ort zu identifizieren,
+und beziehe dich NIE auf einen gleichnamigen Ort woanders.`;
+
+  if(wiki){
+    return base + `\n\nKRITISCH — Quellenbindung: Dir liegt unten ein echter Wikipedia-Auszug zu genau diesem Ort vor.
+Nutze AUSSCHLIESSLICH diesen Text als Faktenquelle (in eigenen Worten umformuliert, nicht wörtlich zitiert). Ergänze
+höchstens sehr allgemeines, unstrittiges Kontextwissen (z.B. grobe Epochen-Einordnung), aber KEINE eigenen spezifischen
+Details (Jahreszahlen, Namen, Ereignisse), die nicht im Text stehen — auch wenn du glaubst, etwas über einen ähnlich
+klingenden Ort zu wissen. Wenn der Text zu dünn für 3-5 Facts ist, gib eben weniger statt etwas zu erfinden. Gib 3-5
+Fun Facts, wenn der Text das hergibt.`;
+  }
+  return base + `\n\nKRITISCH — keine Quelle vorhanden: Für diesen Ort wurde KEINE Wikipedia-Quelle gefunden. Erfinde
+KEINE spezifischen historischen Fakten (keine Jahreszahlen, Namen, Ereignisse, Anekdoten) über diesen konkreten Ort —
+das ist die Hauptursache für frühere Fantasie-Antworten und darf nicht wieder passieren. Schreibe stattdessen ehrlich
+und knapp (2-3 Sätze), dass zu diesem genauen Ort keine gesicherten Informationen vorliegen. Du darfst höchstens ganz
+allgemeine, unstrittige Kontext-Infos zur Region/Gegend nennen, aber klar als "allgemein" kennzeichnen und nicht als
+Fun Fact über den Ort selbst verkaufen.`;
+}
+
 async function findNearbyAndLoad(){
   ensureApiKey(async ()=>{
     try{
@@ -412,13 +476,13 @@ async function findNearbyAndLoad(){
         if(t['name:etymology']) contextText += ` Namensherkunft-Hinweis: ${t['name:etymology']}.`;
         if(t.start_date) contextText += ` Baujahr/Datum laut OSM: ${t.start_date}.`;
         subline.textContent = t.name;
-        await generateFacts(contextText, t.name);
+        await generateFacts(contextText, t.name, locality);
       } else {
         setStatus('Kein markantes Gebäude in der Nähe gefunden — ermittle Adresse…');
         const addr = state.addressLabel || (await reverseGeocode()).display_name || 'unbekannter Ort';
         contextText = `Der Nutzer steht an folgender Adresse (kein spezifisches Baudenkmal in OSM gefunden): ${addr}. Koordinaten: ${state.lat.toFixed(5)}, ${state.lon.toFixed(5)}. Gib Fun Facts zu dieser Gegend/Straße/diesem Viertel, falls möglich, sonst zur nächstgrößeren Stadt. Beziehe dich nur auf diesen konkreten Ort, nicht auf gleichnamige Orte anderswo.`;
         subline.textContent = state.addressDetails?.city || state.addressDetails?.town || state.addressDetails?.village || 'In der Nähe';
-        await generateFacts(contextText, subline.textContent);
+        await generateFacts(contextText, subline.textContent, locality);
       }
     }catch(err){
       setStatus('Fehler bei der Standortsuche: ' + err.message + '. Versuch es mit Foto oder manueller Eingabe.', false);
@@ -436,7 +500,7 @@ function localityString(){
 async function loadFactsForQuery(q){
   setStatus('Hole Fun Facts zu "' + q + '"…');
   subline.textContent = q;
-  await generateFacts(`Ort/Bauwerk (vom Nutzer manuell eingegeben): "${q}".`, q);
+  await generateFacts(`Ort/Bauwerk (vom Nutzer manuell eingegeben): "${q}".`, q, localityString());
 }
 
 function fileToDataURL(file){
@@ -458,53 +522,63 @@ async function loadFactsFromPhoto(file){
       body: JSON.stringify({
         model: VISION_MODEL,
         messages:[
-          { role:'system', content: FACT_SYSTEM + '\nZuerst identifiziere kurz (1 Satz), was auf dem Foto zu sehen ist (Name falls erkennbar, sonst Art des Gebäudes/Ortes), danach direkt die Fun Facts im gleichen Stil.' },
+          { role:'system', content: 'Identifiziere kurz und präzise, was auf dem Foto zu sehen ist: der Eigenname des Gebäudes/Ortes falls erkennbar, sonst eine kurze Beschreibung der Art (z.B. "gotische Dorfkirche", "Fachwerkhaus"). Antworte NUR mit diesem einen kurzen Satz auf Deutsch, ohne weitere Fakten, ohne Geschichte, ohne Spekulation.' },
           { role:'user', content:[
-              { type:'text', text:'Was ist das, und was gibt es Interessantes/Historisches dazu zu wissen?' },
+              { type:'text', text:'Was ist auf diesem Foto zu sehen?' },
               { type:'image_url', image_url:{ url:dataUrl } }
           ]}
         ],
-        temperature:0.6
+        temperature:0.2
       })
     });
     const data = await res.json();
     if(!res.ok) throw new Error(data.error?.message || 'Groq-Fehler');
-    const text = data.choices[0].message.content;
-    const titleGuess = text.split('\n')[0].slice(0,60).replace(/[."]+$/,'');
-    subline.textContent = titleGuess;
-    renderPlaque(titleGuess || 'Vom Foto erkannt', text, 'Per Foto identifiziert');
-    state.context = 'Foto-Identifikation und Fun Facts: ' + text;
-    state.messages = [
-      {role:'system', content: FACT_SYSTEM + '\nDer Nutzer hat gerade folgenden Ort per Foto erkannt bekommen: ' + text + '\nBeantworte Folgefragen dazu im gleichen Stil, präzise und ohne zu erfinden.'},
-      {role:'assistant', content:text}
-    ];
-    enableChat();
+    const identification = data.choices[0].message.content.trim();
+    subline.textContent = identification.slice(0,60);
+    // Now run the same grounded pipeline as GPS/manual search — this is what
+    // stops the vision model from just inventing history straight from the photo.
+    await generateFacts(
+      `Ort/Bauwerk wurde per Foto erkannt: "${identification}".`,
+      identification,
+      localityString()
+    );
   }catch(err){
     setStatus('Fehler bei der Fotoanalyse: ' + err.message, false);
   }
 }
 
-async function generateFacts(contextText, title){
+async function generateFacts(contextText, title, localityHint){
   try{
+    setStatus('Suche nach verlässlichen Quellen…');
+    const wiki = await fetchWikiContext(title, localityHint);
+    const sys = groundedSystemPrompt(wiki);
+    const userMsg = wiki
+      ? `Ort/Bauwerk: "${title}". Zusätzlicher Kontext: ${contextText}\n\nWikipedia-Auszug ("${wiki.title}", ${wiki.lang.toUpperCase()}):\n${wiki.extract}`
+      : `Ort/Bauwerk: "${title}". Zusätzlicher Kontext: ${contextText}\n\n(Keine Wikipedia-Quelle gefunden.)`;
+
+    setStatus('Fun Facts werden geschrieben…');
     const res = await fetch(GROQ_URL, {
       method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer ' + state.apiKey},
       body: JSON.stringify({
         model: TEXT_MODEL,
         messages:[
-          { role:'system', content: FACT_SYSTEM },
-          { role:'user', content: contextText }
+          { role:'system', content: sys },
+          { role:'user', content: userMsg }
         ],
-        temperature:0.6
+        temperature:0.4
       })
     });
     const data = await res.json();
     if(!res.ok) throw new Error(data.error?.message || 'Groq-Fehler');
     const text = data.choices[0].message.content;
-    renderPlaque(title, text, 'Standortbasiert');
+    const badge = wiki
+      ? `Quelle: Wikipedia (${wiki.title})`
+      : '⚠️ Keine Quelle gefunden — mit Vorsicht genießen';
+    renderPlaque(title, text, badge, wiki?.url);
     state.context = contextText;
     state.messages = [
-      { role:'system', content: FACT_SYSTEM + '\nKontext zum aktuellen Ort: ' + contextText + '\nBeantworte Folgefragen des Nutzers dazu im gleichen Stil, präzise und ohne zu erfinden.' },
+      { role:'system', content: sys + '\nKontext zum aktuellen Ort: ' + userMsg + '\nBeantworte Folgefragen des Nutzers dazu im gleichen Stil, streng nach denselben Quellenregeln — nichts erfinden, was nicht in der Quelle steht oder allgemein unstrittig ist.' },
       { role:'assistant', content: text }
     ];
     enableChat();
@@ -517,11 +591,11 @@ function factsToHtml(text){
   return text.split(/\n+/).filter(p=>p.trim()).map(p=>`<p>${p.trim()}</p>`).join('');
 }
 
-function renderPlaque(title, text, eyebrow){
+function renderPlaque(title, text, eyebrow, sourceUrl){
   hideStatus();
   main.innerHTML = `
     <div class="plaque">
-      <div class="eyebrow">${eyebrow}</div>
+      <div class="eyebrow">${eyebrow}${sourceUrl ? ` · <a href="${sourceUrl}" target="_blank" rel="noopener" style="color:var(--gold2);">Quelle ansehen</a>` : ''}</div>
       <h2>${title}</h2>
       <div class="meta">${new Date().toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>
       <div class="facts">${factsToHtml(text)}</div>
