@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Fundfakten</title>
+<style>
+  :root{
+    --bg:#0a0a0a;
+    --panel:#151513;
+    --panel2:#1c1c19;
+    --gold:#d4af37;
+    --gold2:#c8a96e;
+    --ink:#ece7dc;
+    --muted:#948d7c;
+    --line:#2a2924;
+    --serif: Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Times New Roman', serif;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink); font-family:var(--sans);
+    display:flex; flex-direction:column; min-height:100vh;
+    padding-bottom:env(safe-area-inset-bottom);
+  }
+  header{
+    padding:18px 20px 12px; display:flex; align-items:center; justify-content:space-between;
+    border-bottom:1px solid var(--line);
+  }
+  header h1{
+    font-family:var(--serif); font-size:20px; font-weight:600; margin:0; letter-spacing:.3px;
+    color:var(--gold);
+  }
+  header .sub{font-size:11px; color:var(--muted); margin-top:2px; font-family:var(--sans);}
+  .gear{background:none;border:1px solid var(--line);color:var(--muted);border-radius:50%;
+    width:34px;height:34px;font-size:16px;cursor:pointer;flex:none;}
+  main{flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:14px;}
+
+  /* status / loading */
+  .status{
+    display:flex; align-items:center; gap:12px; padding:16px; color:var(--muted);
+    font-size:14px;
+  }
+  .spinner{
+    width:18px;height:18px;border-radius:50%;border:2px solid var(--line);
+    border-top-color:var(--gold); animation:spin 0.9s linear infinite; flex:none;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  /* the plaque card */
+  .plaque{
+    background:linear-gradient(180deg, var(--panel), var(--panel2));
+    border:1px solid var(--line); border-radius:6px; padding:20px 20px 18px;
+    position:relative; overflow:hidden;
+  }
+  .plaque::before{
+    content:""; position:absolute; top:0; left:0; right:0; height:3px;
+    background:linear-gradient(90deg, transparent, var(--gold), transparent);
+  }
+  .plaque .eyebrow{
+    font-size:10.5px; letter-spacing:1.5px; text-transform:uppercase; color:var(--gold2);
+    margin-bottom:6px; font-weight:600;
+  }
+  .plaque h2{
+    font-family:var(--serif); font-size:22px; margin:0 0 4px; color:var(--ink); line-height:1.25;
+  }
+  .plaque .meta{font-size:12px; color:var(--muted); margin-bottom:14px;}
+  .plaque .facts{font-size:15px; line-height:1.65; color:#ddd6c6;}
+  .plaque .facts p{margin:0 0 10px;}
+  .plaque .facts p:last-child{margin-bottom:0;}
+  .plaque .facts strong{color:var(--gold2);}
+
+  /* chat */
+  .chat{display:flex; flex-direction:column; gap:10px;}
+  .msg{max-width:88%; padding:10px 13px; border-radius:10px; font-size:14px; line-height:1.5;}
+  .msg.user{align-self:flex-end; background:#26241c; border:1px solid var(--line); color:var(--ink);}
+  .msg.assistant{align-self:flex-start; background:var(--panel); border:1px solid var(--line); color:#ddd6c6;}
+
+  .empty{
+    text-align:center; color:var(--muted); font-size:13px; padding:40px 20px; line-height:1.6;
+  }
+  .empty b{color:var(--gold2); display:block; font-family:var(--serif); font-size:17px; margin-bottom:6px;}
+
+  footer{
+    border-top:1px solid var(--line); padding:10px 12px; display:flex; gap:8px; align-items:flex-end;
+    background:var(--bg);
+  }
+  .icon-btn{
+    background:var(--panel); border:1px solid var(--line); color:var(--gold2);
+    width:42px; height:42px; border-radius:10px; font-size:18px; flex:none; cursor:pointer;
+  }
+  .icon-btn:active{background:var(--panel2);}
+  textarea#askInput{
+    flex:1; resize:none; background:var(--panel); border:1px solid var(--line); color:var(--ink);
+    border-radius:10px; padding:11px 12px; font-size:14px; font-family:var(--sans); max-height:100px;
+  }
+  textarea#askInput:focus{outline:none; border-color:var(--gold2);}
+  #sendBtn{
+    background:var(--gold); border:none; color:#141311; width:42px; height:42px; border-radius:10px;
+    font-size:16px; flex:none; cursor:pointer; font-weight:700;
+  }
+  #sendBtn:disabled{opacity:.4;}
+
+  /* modal (settings / manual search) */
+  .overlay{
+    position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:flex-end;
+    justify-content:center; z-index:50;
+  }
+  .overlay.show{display:flex;}
+  .sheet{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px 14px 0 0;
+    width:100%; max-width:480px; padding:20px 18px calc(20px + env(safe-area-inset-bottom));
+  }
+  .sheet h3{font-family:var(--serif); margin:0 0 12px; color:var(--gold);}
+  .sheet input[type=text], .sheet input[type=password]{
+    width:100%; background:#0f0f0d; border:1px solid var(--line); color:var(--ink);
+    padding:11px 12px; border-radius:8px; font-size:14px; margin-bottom:10px;
+  }
+  .sheet .row{display:flex; gap:8px;}
+  .sheet button.primary{
+    background:var(--gold); border:none; color:#141311; padding:11px 16px; border-radius:8px;
+    font-weight:700; cursor:pointer; flex:1;
+  }
+  .sheet button.secondary{
+    background:none; border:1px solid var(--line); color:var(--muted); padding:11px 16px;
+    border-radius:8px; cursor:pointer;
+  }
+  .hint{font-size:11px; color:var(--muted); margin-top:-4px; margin-bottom:12px; line-height:1.5;}
+  #fileInput{display:none;}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Fundfakten</h1>
+    <div class="sub" id="subline">Wird geladen…</div>
+  </div>
+  <button class="gear" id="settingsBtn">⚙</button>
+</header>
+
+<main id="main">
+  <div class="status" id="statusBox">
+    <div class="spinner"></div>
+    <span id="statusText">Standort wird ermittelt…</span>
+  </div>
+</main>
+
+<footer>
+  <button class="icon-btn" id="photoBtn" title="Foto">📷</button>
+  <button class="icon-btn" id="searchBtn" title="Manuell suchen">🔍</button>
+  <textarea id="askInput" rows="1" placeholder="Frag nach mehr…" disabled></textarea>
+  <button id="sendBtn" disabled>➤</button>
+</footer>
+
+<input type="file" id="fileInput" accept="image/*" capture="environment">
+
+<!-- Settings sheet -->
+<div class="overlay" id="settingsOverlay">
+  <div class="sheet">
+    <h3>Groq API-Key</h3>
+    <div class="hint">Wird nur lokal auf diesem Gerät gespeichert (localStorage). Key von console.groq.com/keys.</div>
+    <input type="password" id="apiKeyInput" placeholder="gsk_...">
+    <div class="row">
+      <button class="secondary" id="settingsCancel">Abbrechen</button>
+      <button class="primary" id="settingsSave">Speichern</button>
+    </div>
+  </div>
+</div>
+
+<!-- Manual search sheet -->
+<div class="overlay" id="searchOverlay">
+  <div class="sheet">
+    <h3>Ort manuell eingeben</h3>
+    <input type="text" id="manualInput" placeholder="z. B. Kölner Dom, Burg Drachenfels...">
+    <div class="row">
+      <button class="secondary" id="searchCancel">Abbrechen</button>
+      <button class="primary" id="searchGo">Fakten holen</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const TEXT_MODEL = "openai/gpt-oss-120b";
+const VISION_MODEL = "qwen/qwen3.6-27b";
+const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+
+const FACT_SYSTEM = `Du bist ein kenntnisreicher, lebendiger Reisebegleiter für historische Fun Facts.
+Antworte immer auf Deutsch. Gib 3-5 überraschende, historisch korrekte Fun Facts zum genannten Ort/Bauwerk.
+Stil: modern, lebendig, seriös und korrekt - keine trockenen Lexikon-Einträge, sondern überraschende Details,
+Anekdoten und kuriose Zahlen, die im Gedächtnis bleiben. Kurz und prägnant, ein Fact pro Absatz, keine Emojis,
+keine nummerierten Listen, keine Überschriften. Wenn du bei einem Detail unsicher bist, sag das knapp statt zu erfinden.`;
+
+let state = {
+  apiKey: localStorage.getItem('groq_api_key') || '',
+  lat: null, lon: null,
+  context: null,        // description of current place, used for chat continuation
+  messages: [],         // {role, content} for ongoing chat
+};
+
+const $ = id => document.getElementById(id);
+const main = $('main'), statusBox = $('statusBox'), statusText = $('statusText'), subline = $('subline');
+const askInput = $('askInput'), sendBtn = $('sendBtn');
+
+function setStatus(text, spinning=true){
+  statusBox.style.display='flex';
+  statusText.textContent = text;
+  statusBox.querySelector('.spinner').style.display = spinning ? 'block' : 'none';
+}
+function hideStatus(){ statusBox.style.display='none'; }
+
+function ensureApiKey(cb){
+  if(state.apiKey){ cb(); return; }
+  openSettings();
+  setStatus('Bitte zuerst Groq API-Key eintragen (⚙ oben rechts).', false);
+}
+
+// ---------- Settings sheet ----------
+function openSettings(){
+  $('apiKeyInput').value = state.apiKey;
+  $('settingsOverlay').classList.add('show');
+}
+$('settingsBtn').onclick = openSettings;
+$('settingsCancel').onclick = ()=> $('settingsOverlay').classList.remove('show');
+$('settingsSave').onclick = ()=>{
+  const v = $('apiKeyInput').value.trim();
+  state.apiKey = v;
+  localStorage.setItem('groq_api_key', v);
+  $('settingsOverlay').classList.remove('show');
+  if(v && !state.context) init();
+};
+
+// ---------- Manual search sheet ----------
+$('searchBtn').onclick = ()=>{ $('manualInput').value=''; $('searchOverlay').classList.add('show'); $('manualInput').focus(); };
+$('searchCancel').onclick = ()=> $('searchOverlay').classList.remove('show');
+$('searchGo').onclick = ()=>{
+  const q = $('manualInput').value.trim();
+  if(!q) return;
+  $('searchOverlay').classList.remove('show');
+  ensureApiKey(()=> loadFactsForQuery(q));
+};
+
+// ---------- Photo ----------
+$('photoBtn').onclick = ()=> $('fileInput').click();
+$('fileInput').onchange = (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  ensureApiKey(()=> loadFactsFromPhoto(file));
+  e.target.value = '';
+};
+
+// ---------- Init: geolocation -> Overpass -> Groq ----------
+function init(){
+  if(!navigator.geolocation){
+    setStatus('Geolocation wird von diesem Browser nicht unterstützt. Nutze Foto oder manuelle Eingabe.', false);
+    return;
+  }
+  setStatus('Standort wird ermittelt…');
+  navigator.geolocation.getCurrentPosition(
+    pos=>{
+      state.lat = pos.coords.latitude;
+      state.lon = pos.coords.longitude;
+      subline.textContent = `${state.lat.toFixed(5)}, ${state.lon.toFixed(5)}`;
+      findNearbyAndLoad();
+    },
+    err=>{
+      setStatus('Standort nicht verfügbar (' + err.message + '). Nutze Foto oder manuelle Eingabe.', false);
+    },
+    { enableHighAccuracy:true, timeout:12000, maximumAge:30000 }
+  );
+}
+
+function haversine(lat1,lon1,lat2,lon2){
+  const R=6371000, toRad=d=>d*Math.PI/180;
+  const dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1);
+  const a=Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(a));
+}
+
+async function overpassQuery(radius){
+  const {lat, lon} = state;
+  const q = `[out:json][timeout:15];(
+    nwr(around:${radius},${lat},${lon})[historic];
+    nwr(around:${radius},${lat},${lon})[tourism~"attraction|museum|artwork|viewpoint|gallery"];
+    nwr(around:${radius},${lat},${lon})[amenity=place_of_worship];
+    nwr(around:${radius},${lat},${lon})[building~"church|cathedral|chapel|castle|palace|monastery"];
+    nwr(around:${radius},${lat},${lon})[man_made=tower];
+  );out center tags;`;
+  const res = await fetch('https://overpass-api.de/api/interpreter', {
+    method:'POST', body:'data=' + encodeURIComponent(q),
+    headers:{'Content-Type':'application/x-www-form-urlencoded'}
+  });
+  if(!res.ok) throw new Error('Overpass ' + res.status);
+  return res.json();
+}
+
+function pickBest(elements){
+  const {lat, lon} = state;
+  let best = null, bestD = Infinity;
+  for(const el of elements){
+    const tags = el.tags || {};
+    if(!tags.name) continue;
+    const elat = el.lat ?? el.center?.lat;
+    const elon = el.lon ?? el.center?.lon;
+    if(elat==null || elon==null) continue;
+    const d = haversine(lat, lon, elat, elon);
+    if(d < bestD){ bestD = d; best = {tags, d}; }
+  }
+  return best;
+}
+
+async function reverseGeocode(){
+  const {lat, lon} = state;
+  const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=18&addressdetails=1`);
+  if(!res.ok) throw new Error('Nominatim ' + res.status);
+  return res.json();
+}
+
+async function findNearbyAndLoad(){
+  ensureApiKey(async ()=>{
+    try{
+      setStatus('Suche nach Sehenswertem in der Nähe…');
+      let best = null;
+      for(const radius of [80, 250, 600]){
+        const data = await overpassQuery(radius);
+        best = pickBest(data.elements || []);
+        if(best) break;
+      }
+      let contextText;
+      if(best){
+        const t = best.tags;
+        const kind = t.historic || t.tourism || t.amenity || t.building || t.man_made || '';
+        contextText = `Ort/Bauwerk: "${t.name}". Typ: ${kind}. Entfernung: ~${Math.round(best.d)}m vom Nutzer.`;
+        if(t['name:etymology']) contextText += ` Namensherkunft-Hinweis: ${t['name:etymology']}.`;
+        if(t.start_date) contextText += ` Baujahr/Datum laut OSM: ${t.start_date}.`;
+        subline.textContent = t.name;
+        await generateFacts(contextText, t.name);
+      } else {
+        setStatus('Kein markantes Gebäude in der Nähe gefunden — ermittle Adresse…');
+        const geo = await reverseGeocode();
+        const addr = geo.display_name || 'unbekannter Ort';
+        contextText = `Der Nutzer steht an folgender Adresse (kein spezifisches Baudenkmal in OSM gefunden): ${addr}. Koordinaten: ${state.lat.toFixed(5)}, ${state.lon.toFixed(5)}. Gib Fun Facts zu dieser Gegend/Straße/diesem Viertel, falls möglich, sonst zur nächstgrößeren Stadt.`;
+        subline.textContent = geo.address?.city || geo.address?.town || geo.address?.village || 'In der Nähe';
+        await generateFacts(contextText, subline.textContent);
+      }
+    }catch(err){
+      setStatus('Fehler bei der Standortsuche: ' + err.message + '. Versuch es mit Foto oder manueller Eingabe.', false);
+    }
+  });
+}
+
+async function loadFactsForQuery(q){
+  setStatus('Hole Fun Facts zu "' + q + '"…');
+  subline.textContent = q;
+  await generateFacts(`Ort/Bauwerk (vom Nutzer manuell eingegeben): "${q}".`, q);
+}
+
+function fileToDataURL(file){
+  return new Promise((res,rej)=>{
+    const r = new FileReader();
+    r.onload = ()=> res(r.result);
+    r.onerror = ()=> rej(new Error('Foto konnte nicht gelesen werden'));
+    r.readAsDataURL(file);
+  });
+}
+
+async function loadFactsFromPhoto(file){
+  try{
+    setStatus('Foto wird analysiert…');
+    const dataUrl = await fileToDataURL(file);
+    const res = await fetch(GROQ_URL, {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer ' + state.apiKey},
+      body: JSON.stringify({
+        model: VISION_MODEL,
+        messages:[
+          { role:'system', content: FACT_SYSTEM + '\nZuerst identifiziere kurz (1 Satz), was auf dem Foto zu sehen ist (Name falls erkennbar, sonst Art des Gebäudes/Ortes), danach direkt die Fun Facts im gleichen Stil.' },
+          { role:'user', content:[
+              { type:'text', text:'Was ist das, und was gibt es Interessantes/Historisches dazu zu wissen?' },
+              { type:'image_url', image_url:{ url:dataUrl } }
+          ]}
+        ],
+        temperature:0.6
+      })
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error?.message || 'Groq-Fehler');
+    const text = data.choices[0].message.content;
+    const titleGuess = text.split('\n')[0].slice(0,60).replace(/[."]+$/,'');
+    subline.textContent = titleGuess;
+    renderPlaque(titleGuess || 'Vom Foto erkannt', text, 'Per Foto identifiziert');
+    state.context = 'Foto-Identifikation und Fun Facts: ' + text;
+    state.messages = [
+      {role:'system', content: FACT_SYSTEM + '\nDer Nutzer hat gerade folgenden Ort per Foto erkannt bekommen: ' + text + '\nBeantworte Folgefragen dazu im gleichen Stil, präzise und ohne zu erfinden.'},
+      {role:'assistant', content:text}
+    ];
+    enableChat();
+  }catch(err){
+    setStatus('Fehler bei der Fotoanalyse: ' + err.message, false);
+  }
+}
+
+async function generateFacts(contextText, title){
+  try{
+    const res = await fetch(GROQ_URL, {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer ' + state.apiKey},
+      body: JSON.stringify({
+        model: TEXT_MODEL,
+        messages:[
+          { role:'system', content: FACT_SYSTEM },
+          { role:'user', content: contextText }
+        ],
+        temperature:0.6
+      })
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error?.message || 'Groq-Fehler');
+    const text = data.choices[0].message.content;
+    renderPlaque(title, text, 'Standortbasiert');
+    state.context = contextText;
+    state.messages = [
+      { role:'system', content: FACT_SYSTEM + '\nKontext zum aktuellen Ort: ' + contextText + '\nBeantworte Folgefragen des Nutzers dazu im gleichen Stil, präzise und ohne zu erfinden.' },
+      { role:'assistant', content: text }
+    ];
+    enableChat();
+  }catch(err){
+    setStatus('Fehler beim Abrufen der Fun Facts: ' + err.message, false);
+  }
+}
+
+function factsToHtml(text){
+  return text.split(/\n+/).filter(p=>p.trim()).map(p=>`<p>${p.trim()}</p>`).join('');
+}
+
+function renderPlaque(title, text, eyebrow){
+  hideStatus();
+  main.innerHTML = `
+    <div class="plaque">
+      <div class="eyebrow">${eyebrow}</div>
+      <h2>${title}</h2>
+      <div class="meta">${new Date().toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>
+      <div class="facts">${factsToHtml(text)}</div>
+    </div>
+    <div class="chat" id="chatLog"></div>
+  `;
+}
+
+function enableChat(){
+  askInput.disabled = false;
+  sendBtn.disabled = false;
+  askInput.focus();
+}
+
+function appendChatMsg(role, text){
+  let log = $('chatLog');
+  if(!log){
+    main.insertAdjacentHTML('beforeend', '<div class="chat" id="chatLog"></div>');
+    log = $('chatLog');
+  }
+  const div = document.createElement('div');
+  div.className = 'msg ' + (role==='user' ? 'user' : 'assistant');
+  div.textContent = text;
+  log.appendChild(div);
+  main.scrollTop = main.scrollHeight;
+}
+
+async function sendFollowUp(){
+  const q = askInput.value.trim();
+  if(!q || !state.apiKey) return;
+  askInput.value = '';
+  sendBtn.disabled = true;
+  appendChatMsg('user', q);
+  state.messages.push({role:'user', content:q});
+  try{
+    const res = await fetch(GROQ_URL, {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer ' + state.apiKey},
+      body: JSON.stringify({ model: TEXT_MODEL, messages: state.messages, temperature:0.6 })
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error?.message || 'Groq-Fehler');
+    const answer = data.choices[0].message.content;
+    state.messages.push({role:'assistant', content:answer});
+    appendChatMsg('assistant', answer);
+  }catch(err){
+    appendChatMsg('assistant', 'Fehler: ' + err.message);
+  }finally{
+    sendBtn.disabled = false;
+  }
+}
+sendBtn.onclick = sendFollowUp;
+askInput.addEventListener('keydown', e=>{
+  if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendFollowUp(); }
+});
+askInput.addEventListener('input', ()=>{
+  askInput.style.height='auto';
+  askInput.style.height = Math.min(askInput.scrollHeight,100)+'px';
+});
+
+// ---------- Boot ----------
+main.innerHTML = `<div class="status" id="statusBox"><div class="spinner"></div><span id="statusText">Standort wird ermittelt…</span></div>`;
+if(!state.apiKey){
+  openSettings();
+  setStatus('Bitte zuerst Groq API-Key eintragen (⚙ oben rechts).', false);
+} else {
+  init();
+}
+</script>
+</body>
+</html>
