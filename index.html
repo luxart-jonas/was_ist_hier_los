@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Fundfakten</title>
+<title>Fundfakten v0.3.0</title>
 <style>
   :root{
     --bg:#0a0a0a;
@@ -136,7 +136,7 @@
 
 <header>
   <div>
-    <h1>Fundfakten</h1>
+    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v0.3.0</span></h1>
     <div class="sub" id="subline">Wird geladen…</div>
   </div>
   <button class="gear" id="settingsBtn">⚙</button>
@@ -192,7 +192,12 @@ const FACT_SYSTEM = `Du bist ein kenntnisreicher, lebendiger Reisebegleiter für
 Antworte immer auf Deutsch. Gib 3-5 überraschende, historisch korrekte Fun Facts zum genannten Ort/Bauwerk.
 Stil: modern, lebendig, seriös und korrekt - keine trockenen Lexikon-Einträge, sondern überraschende Details,
 Anekdoten und kuriose Zahlen, die im Gedächtnis bleiben. Kurz und prägnant, ein Fact pro Absatz, keine Emojis,
-keine nummerierten Listen, keine Überschriften. Wenn du bei einem Detail unsicher bist, sag das knapp statt zu erfinden.`;
+keine nummerierten Listen, keine Überschriften. Wenn du bei einem Detail unsicher bist, sag das knapp statt zu erfinden.
+KRITISCH: Namen von Gebäuden/Orten sind oft nicht eindeutig — dasselbe oder ein ähnliches Wort kann in mehreren Ländern
+vorkommen (z.B. gleichnamige Gebäude in Portugal und Brasilien). Nutze IMMER die mitgelieferte Stadt/Land-Angabe, um den
+richtigen Ort zu identifizieren. Wenn Land/Stadt nicht zu deinem Wissen über diesen Namen passt, sag lieber ehrlich,
+dass du zu diesem konkreten, lokal benannten Ort nichts Gesichertes weißt, statt Fakten über einen gleichnamigen Ort
+woanders zu liefern.`;
 
 let state = {
   apiKey: localStorage.getItem('groq_api_key') || '',
@@ -304,16 +309,15 @@ async function confirmLocation(acc){
   try{
     const geo = await reverseGeocode();
     label = geo.display_name || null;
+    state.addressLabel = label;
+    state.addressDetails = geo.address || null;
   }catch(e){ /* ignore, we can still proceed on coords alone */ }
 
-  const suspicious = acc > 3000;
-
-  if(suspicious){
-    renderLocationCheck(label, acc);
-  } else {
-    subline.textContent = label ? label.split(',').slice(0,2).join(',') : subline.textContent;
-    findNearbyAndLoad();
-  }
+  // Always show the confirmation screen. WiFi/IP-based geolocation on laptops
+  // can report a deceptively small accuracy value while still being hundreds
+  // or thousands of km off (stale AP database entries), so accuracy alone
+  // can't be trusted as a signal to skip confirmation.
+  renderLocationCheck(label, acc);
 }
 
 function renderLocationCheck(label, acc){
@@ -390,27 +394,39 @@ async function findNearbyAndLoad(){
         best = pickBest(data.elements || []);
         if(best) break;
       }
+      // Always resolve a locality string (city/region/country) to disambiguate
+      // names that also exist elsewhere in the world — without this, Groq has
+      // been mixing up e.g. a Portuguese building with a same-named place in Brazil.
+      const locality = localityString();
+
       let contextText;
       if(best){
         const t = best.tags;
         const kind = t.historic || t.tourism || t.amenity || t.building || t.man_made || '';
         contextText = `Ort/Bauwerk: "${t.name}". Typ: ${kind}. Entfernung: ~${Math.round(best.d)}m vom Nutzer.`;
+        contextText += ` WICHTIG — genauer Standort laut GPS: ${locality || (state.lat.toFixed(5)+', '+state.lon.toFixed(5))}. Beziehe dich ausschließlich auf das Bauwerk mit diesem Namen an genau diesem Ort — falls der Name auch anderswo auf der Welt existiert (z.B. gleichnamiges Gebäude in einem anderen Land), ignoriere das und sag im Zweifel lieber, dass du zu diesem konkreten Ort nicht genug weißt, statt Fakten über den falschen Ort zu geben.`;
         if(t['name:etymology']) contextText += ` Namensherkunft-Hinweis: ${t['name:etymology']}.`;
         if(t.start_date) contextText += ` Baujahr/Datum laut OSM: ${t.start_date}.`;
         subline.textContent = t.name;
         await generateFacts(contextText, t.name);
       } else {
         setStatus('Kein markantes Gebäude in der Nähe gefunden — ermittle Adresse…');
-        const geo = await reverseGeocode();
-        const addr = geo.display_name || 'unbekannter Ort';
-        contextText = `Der Nutzer steht an folgender Adresse (kein spezifisches Baudenkmal in OSM gefunden): ${addr}. Koordinaten: ${state.lat.toFixed(5)}, ${state.lon.toFixed(5)}. Gib Fun Facts zu dieser Gegend/Straße/diesem Viertel, falls möglich, sonst zur nächstgrößeren Stadt.`;
-        subline.textContent = geo.address?.city || geo.address?.town || geo.address?.village || 'In der Nähe';
+        const addr = state.addressLabel || (await reverseGeocode()).display_name || 'unbekannter Ort';
+        contextText = `Der Nutzer steht an folgender Adresse (kein spezifisches Baudenkmal in OSM gefunden): ${addr}. Koordinaten: ${state.lat.toFixed(5)}, ${state.lon.toFixed(5)}. Gib Fun Facts zu dieser Gegend/Straße/diesem Viertel, falls möglich, sonst zur nächstgrößeren Stadt. Beziehe dich nur auf diesen konkreten Ort, nicht auf gleichnamige Orte anderswo.`;
+        subline.textContent = state.addressDetails?.city || state.addressDetails?.town || state.addressDetails?.village || 'In der Nähe';
         await generateFacts(contextText, subline.textContent);
       }
     }catch(err){
       setStatus('Fehler bei der Standortsuche: ' + err.message + '. Versuch es mit Foto oder manueller Eingabe.', false);
     }
   });
+}
+
+function localityString(){
+  const a = state.addressDetails;
+  if(!a) return null;
+  const parts = [a.suburb, a.city || a.town || a.village, a.state, a.country].filter(Boolean);
+  return parts.length ? parts.join(', ') : null;
 }
 
 async function loadFactsForQuery(q){
