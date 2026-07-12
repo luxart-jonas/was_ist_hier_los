@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Fundfakten v0.4.0</title>
+<title>Fundfakten v0.5.0</title>
 <style>
   :root{
     --bg:#0a0a0a;
@@ -136,7 +136,7 @@
 
 <header>
   <div>
-    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v0.4.0</span></h1>
+    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v0.5.0</span></h1>
     <div class="sub" id="subline">Wird geladen…</div>
   </div>
   <button class="gear" id="settingsBtn">⚙</button>
@@ -405,6 +405,24 @@ async function wikiSummary(lang, title){
   }catch(e){ return null; }
 }
 
+// The REST "summary" endpoint above only returns the short lead paragraph —
+// nowhere near enough for e.g. a town's actual history. Pull the full article
+// plaintext via the action API instead, and only use the summary for the
+// canonical title/description/URL bits.
+async function wikiFullExtract(lang, title){
+  try{
+    const url = `https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&format=json&origin=*&redirects=1&titles=${encodeURIComponent(title)}`;
+    const res = await fetch(url);
+    if(!res.ok) return null;
+    const data = await res.json();
+    const pages = data.query && data.query.pages;
+    if(!pages) return null;
+    const page = Object.values(pages)[0];
+    if(!page || page.missing !== undefined || !page.extract) return null;
+    return page.extract;
+  }catch(e){ return null; }
+}
+
 async function fetchWikiContext(name, localityHint){
   const queries = [];
   if(localityHint) queries.push(name + ' ' + localityHint.split(',')[0]);
@@ -414,14 +432,18 @@ async function fetchWikiContext(name, localityHint){
       const results = await wikiSearch(lang, q);
       for(const r of results.slice(0,2)){
         const summary = await wikiSummary(lang, r.title);
-        if(summary){
-          return {
-            title: summary.title,
-            extract: summary.extract,
-            url: summary.content_urls?.desktop?.page || null,
-            lang
-          };
-        }
+        if(!summary) continue;
+        const full = await wikiFullExtract(lang, r.title);
+        const extract = full && full.length > summary.extract.length ? full : summary.extract;
+        return {
+          title: summary.title,
+          // Generous cap (~7000 chars ≈ several pages) — enough to cover a
+          // History/Geschichte section, not just the lead paragraph, while
+          // staying well within the model's context window.
+          extract: extract.slice(0, 7000),
+          url: summary.content_urls?.desktop?.page || null,
+          lang
+        };
       }
     }
   }
@@ -437,12 +459,14 @@ Gebäude in Portugal und Brasilien). Nutze immer die mitgelieferte Stadt/Land-An
 und beziehe dich NIE auf einen gleichnamigen Ort woanders.`;
 
   if(wiki){
-    return base + `\n\nKRITISCH — Quellenbindung: Dir liegt unten ein echter Wikipedia-Auszug zu genau diesem Ort vor.
-Nutze AUSSCHLIESSLICH diesen Text als Faktenquelle (in eigenen Worten umformuliert, nicht wörtlich zitiert). Ergänze
-höchstens sehr allgemeines, unstrittiges Kontextwissen (z.B. grobe Epochen-Einordnung), aber KEINE eigenen spezifischen
-Details (Jahreszahlen, Namen, Ereignisse), die nicht im Text stehen — auch wenn du glaubst, etwas über einen ähnlich
-klingenden Ort zu wissen. Wenn der Text zu dünn für 3-5 Facts ist, gib eben weniger statt etwas zu erfinden. Gib 3-5
-Fun Facts, wenn der Text das hergibt.`;
+    return base + `\n\nKRITISCH — Quellenbindung: Dir liegt unten ein vollständiger Wikipedia-Artikel(auszug) zu genau
+diesem Ort vor, inklusive Abschnitten wie Geschichte, Namensherkunft, Bauwerke etc. Nutze AUSSCHLIESSLICH diesen Text
+als Faktenquelle (in eigenen Worten umformuliert, nicht wörtlich zitiert) — durchsuche ihn ruhig ganz, nicht nur den
+ersten Absatz, gerade Geschichts-Abschnitte liefern oft die interessantesten Details. Ergänze höchstens sehr allgemeines,
+unstrittiges Kontextwissen (z.B. grobe Epochen-Einordnung), aber KEINE eigenen spezifischen Details (Jahreszahlen, Namen,
+Ereignisse), die nicht im Text stehen — auch wenn du glaubst, etwas über einen ähnlich klingenden Ort zu wissen. Gib
+4-6 Fun Facts, wenn der Text das hergibt (weniger nur, wenn der Text wirklich zu dünn ist) — bevorzuge dabei überraschende,
+wenig offensichtliche Details gegenüber generischen Basisfakten wie reiner Einwohnerzahl.`;
   }
   return base + `\n\nKRITISCH — keine Quelle vorhanden: Für diesen Ort wurde KEINE Wikipedia-Quelle gefunden. Erfinde
 KEINE spezifischen historischen Fakten (keine Jahreszahlen, Namen, Ereignisse, Anekdoten) über diesen konkreten Ort —
