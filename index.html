@@ -259,18 +259,79 @@ function init(){
     return;
   }
   setStatus('Standort wird ermittelt…');
+
+  let settled = false;
+  const hardTimeout = setTimeout(()=>{
+    if(settled) return;
+    settled = true;
+    setStatus('Standortermittlung dauert zu lange oder hängt. Nutze Foto oder manuelle Eingabe.', false);
+  }, 15000);
+
+  if(navigator.permissions && navigator.permissions.query){
+    navigator.permissions.query({name:'geolocation'}).then(p=>{
+      if(p.state === 'denied'){
+        settled = true; clearTimeout(hardTimeout);
+        setStatus('Standortzugriff ist für diese Seite blockiert (Browser-Einstellung). Bitte in den Chrome-Einstellungen unter Website-Berechtigungen freigeben, oder Foto/manuelle Eingabe nutzen.', false);
+      }
+    }).catch(()=>{});
+  }
+
   navigator.geolocation.getCurrentPosition(
     pos=>{
+      if(settled) return;
+      settled = true; clearTimeout(hardTimeout);
       state.lat = pos.coords.latitude;
       state.lon = pos.coords.longitude;
-      subline.textContent = `${state.lat.toFixed(5)}, ${state.lon.toFixed(5)}`;
-      findNearbyAndLoad();
+      const acc = Math.round(pos.coords.accuracy || 0);
+      confirmLocation(acc);
     },
     err=>{
-      setStatus('Standort nicht verfügbar (' + err.message + '). Nutze Foto oder manuelle Eingabe.', false);
+      if(settled) return;
+      settled = true; clearTimeout(hardTimeout);
+      const hint = err.code === 1
+        ? ' Zugriff wurde verweigert — prüf die Website-Berechtigungen in Chrome.'
+        : '';
+      setStatus('Standort nicht verfügbar (' + err.message + ').' + hint + ' Nutze Foto oder manuelle Eingabe.', false);
     },
-    { enableHighAccuracy:true, timeout:12000, maximumAge:30000 }
+    { enableHighAccuracy:true, timeout:14000, maximumAge:0 }
   );
+}
+
+async function confirmLocation(acc){
+  subline.textContent = `${state.lat.toFixed(5)}, ${state.lon.toFixed(5)} (±${acc}m)`;
+  setStatus('Standort gefunden (±' + acc + 'm) — prüfe Adresse…');
+  let label = null;
+  try{
+    const geo = await reverseGeocode();
+    label = geo.display_name || null;
+  }catch(e){ /* ignore, we can still proceed on coords alone */ }
+
+  const suspicious = acc > 3000;
+
+  if(suspicious){
+    renderLocationCheck(label, acc);
+  } else {
+    subline.textContent = label ? label.split(',').slice(0,2).join(',') : subline.textContent;
+    findNearbyAndLoad();
+  }
+}
+
+function renderLocationCheck(label, acc){
+  hideStatus();
+  main.innerHTML = `
+    <div class="plaque">
+      <div class="eyebrow">Standort prüfen</div>
+      <h2>Ist das richtig?</h2>
+      <div class="meta">Genauigkeit nur ±${acc}m — auf Laptops ohne GPS (WLAN-Ortung) manchmal stark daneben.</div>
+      <div class="facts"><p>${label ? label : 'Koordinaten: ' + state.lat.toFixed(5) + ', ' + state.lon.toFixed(5)}</p></div>
+      <div class="row" style="display:flex;gap:8px;margin-top:14px;">
+        <button class="secondary" id="locWrong" style="flex:1;background:none;border:1px solid var(--line);color:var(--muted);padding:11px 16px;border-radius:8px;cursor:pointer;">Falsch — manuell eingeben</button>
+        <button class="primary" id="locOk" style="flex:1;background:var(--gold);border:none;color:#141311;padding:11px 16px;border-radius:8px;font-weight:700;cursor:pointer;">Passt, weiter</button>
+      </div>
+    </div>
+  `;
+  $('locOk').onclick = ()=> findNearbyAndLoad();
+  $('locWrong').onclick = ()=>{ $('manualInput').value=''; $('searchOverlay').classList.add('show'); $('manualInput').focus(); };
 }
 
 function haversine(lat1,lon1,lat2,lon2){
