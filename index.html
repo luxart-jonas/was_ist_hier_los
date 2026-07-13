@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Fundfakten v1.3.0</title>
+<title>Fundfakten v1.4.0</title>
 <style>
   :root{
     --bg:#0a0a0a;
@@ -138,7 +138,7 @@
 
 <header>
   <div>
-    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v1.3.0</span></h1>
+    <h1>Fundfakten <span style="font-size:11px;color:var(--muted);font-family:var(--sans);vertical-align:middle;">v1.4.0</span></h1>
     <div class="sub" id="subline">Wird geladen…</div>
   </div>
   <button class="gear" id="settingsBtn">⚙</button>
@@ -200,7 +200,7 @@ const GROQ_TEXT_MODEL = "openai/gpt-oss-120b";
 const GROQ_VISION_MODEL = "qwen/qwen3.6-27b";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
-const ANTHROPIC_TEXT_MODEL = "claude-sonnet-5";
+const ANTHROPIC_TEXT_MODEL = "claude-haiku-4-5-20251001"; // cheaper than Sonnet 5 ($1/$5 vs $2/$10 per MTok) — fine here since the task is extractive summarization of already-sourced material, not open-ended reasoning
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
@@ -216,8 +216,41 @@ let state = {
   nearbyList: null,       // candidates from the last GPS lookup, so "back to list" doesn't re-query
   locality: null,
   currentTopic: null,     // name of the topic currently open, used to keep topicCache in sync
-  topicCache: {},         // name -> {context, systemPrompt, apiMessages, displayLog, badge, sourceUrl, citations, factsText}
+  topicCache: {},         // name -> {context, systemPrompt, apiMessages, displayLog, badge, sourceUrl, citations, factsText, ts}
 };
+
+// ---------- Persistent cache (7-day TTL) ----------
+// This is the real cost-saver: clicking a topic you (or a past session) already
+// fetched within the last 7 days costs zero API tokens — served straight from
+// localStorage instead of calling Groq/Claude again.
+const CACHE_KEY = 'fundfakten_topic_cache_v1';
+const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function loadPersistedCache(){
+  try{
+    const raw = localStorage.getItem(CACHE_KEY);
+    if(!raw) return {};
+    const obj = JSON.parse(raw);
+    const now = Date.now();
+    const pruned = {};
+    for(const [k,v] of Object.entries(obj)){
+      if(v && v.ts && (now - v.ts) < CACHE_TTL_MS) pruned[k] = v;
+    }
+    return pruned;
+  }catch(e){ return {}; }
+}
+
+function savePersistedCache(){
+  try{ localStorage.setItem(CACHE_KEY, JSON.stringify(state.topicCache)); }catch(e){ /* storage full or unavailable, non-fatal */ }
+}
+
+function cacheTopic(name, data){
+  state.topicCache[name] = { ...data, ts: Date.now() };
+  savePersistedCache();
+}
+
+state.topicCache = loadPersistedCache();
+
 
 const $ = id => document.getElementById(id);
 const main = $('main'), subline = $('subline');
@@ -786,17 +819,93 @@ function renderTopicList(){
     groupsHtml.push(`<div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin:16px 0 2px; padding-left:4px;">Weitere Orte</div>${rest.map(renderCandidateRow).join('')}`);
   }
 
+  const uncachedCount = list.filter(c => !state.topicCache[c.name]).length;
+  const batchHtml = uncachedCount > 1
+    ? `<button id="batchAllBtn" style="width:100%; background:var(--panel); border:1px solid var(--line); color:var(--gold2); border-radius:10px; padding:11px 14px; font-size:13px; cursor:pointer; margin-top:14px;">⚡ Alle ${uncachedCount} offenen Orte auf einmal recherchieren</button>
+       <div style="font-size:10.5px; color:var(--muted); margin-top:6px; line-height:1.5;">Eine gebündelte Anfrage statt einzelner Klicks — spart Overhead, aber bezahlt auch Orte, die du am Ende nicht anschaust. Bei gezieltem Interesse ist einzeln antippen meist günstiger.</div>`
+    : '';
+
   main.innerHTML = `
     <div class="plaque">
       <div class="eyebrow">In der Nähe</div>
       <h2>Worüber möchtest du mehr wissen?</h2>
       <div class="meta">${state.locality || ''}</div>
       <div style="margin-top:4px;">${groupsHtml.join('')}</div>
+      ${batchHtml}
     </div>
   `;
   main.querySelectorAll('.topic-row').forEach(row=>{
     row.onclick = ()=> selectTopic(row.getAttribute('data-name'));
   });
+  if(uncachedCount > 1){
+    $('batchAllBtn').onclick = ()=> batchResearchAll();
+  }
+}
+
+async function batchResearchAll(){
+  const missing = state.nearbyList.filter(c => !state.topicCache[c.name]);
+  if(!missing.length) return;
+  try{
+    setStatus(`Recherchiere ${missing.length} Orte in einer Anfrage…`);
+    const groundings = await Promise.all(missing.map(async c => ({
+      candidate: c,
+      sources: await fetchGroundingSources(c.name, state.locality)
+    })));
+
+    const sys = groundedSystemPrompt({ wiki:true }) + `\n\nDIESES MAL BESONDERS: Du bekommst mehrere Orte auf einmal, jeweils mit eigenen Quellen klar
+abgegrenzt durch "=== ORT N ===". Antworte AUSSCHLIESSLICH mit validem JSON, keine Markdown-Codeblöcke, kein Text davor
+oder danach: ein Array von Objekten, je Ort ein Objekt {"name": "<exakter Name wie angegeben>", "facts": "<Fun-Fact-Text
+im gewohnten Stil, Absätze durch \\n\\n getrennt>"}. Wende die Quellen-/Websuche-Regeln pro Ort unabhängig an — ein Ort
+ohne Quellen bekommt ehrlich den "keine Quelle"-Text, auch wenn andere Orte im selben Batch gute Quellen haben.`;
+
+    let userMsg = 'Hier sind mehrere Orte mit ihren Quellen:\n\n';
+    groundings.forEach((g, i) => {
+      userMsg += `=== ORT ${i+1}: "${g.candidate.name}" (Typ: ${g.candidate.kindLabel}, ~${Math.round(g.candidate.d)}m entfernt, Region: ${state.locality || 'unbekannt'}) ===\n`;
+      userMsg += buildSourceUserMessage(g.candidate.name, `Typ: ${g.candidate.kind}.`, g.sources) + '\n\n';
+    });
+
+    const res = await fetch(GROQ_URL, {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer ' + state.groqKey},
+      body: JSON.stringify({
+        model: GROQ_TEXT_MODEL,
+        messages:[ { role:'system', content: sys }, { role:'user', content: userMsg } ],
+        temperature:0.4,
+        max_tokens: 900 * missing.length + 600,
+        tools:[{ type:'browser_search' }],
+        tool_choice:'auto'
+      })
+    });
+    if(res.status === 429){
+      const errData = await res.json().catch(()=>({}));
+      throw new Error(formatGroqRateLimitMessage(errData));
+    }
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error?.message || 'Groq-Fehler');
+    let raw = data.choices[0].message.content.trim();
+    raw = raw.replace(/^```json\s*/i,'').replace(/^```\s*/,'').replace(/```\s*$/,'').trim();
+    const entries = JSON.parse(raw);
+
+    entries.forEach(entry => {
+      const g = groundings.find(x => x.candidate.name === entry.name);
+      if(!g || !entry.facts) return;
+      const perSys = groundedSystemPrompt(g.sources);
+      const perUserMsg = buildSourceUserMessage(g.candidate.name, `Typ: ${g.candidate.kind}.`, g.sources);
+      cacheTopic(entry.name, {
+        context: perUserMsg,
+        systemPrompt: perSys + '\nBeantworte Folgefragen des Nutzers dazu im gleichen Stil, streng nach denselben Quellenregeln — nichts erfinden, was nicht in der Quelle steht oder allgemein unstrittig ist. Nutze die Websuche auch hier bei Bedarf für sehr lokale Details.',
+        apiMessages: [ { role:'user', content: perUserMsg }, { role:'assistant', content: entry.facts } ],
+        displayLog: [],
+        badge: sourceBadge(g.sources, false),
+        sourceUrl: g.sources?.wiki?.url || g.sources?.wikidata?.url || g.sources?.gnd?.url || null,
+        citations: null,
+        factsText: entry.facts
+      });
+    });
+    renderTopicList();
+  }catch(err){
+    setStatus('Fehler bei der Sammel-Recherche: ' + err.message, false);
+  }
 }
 
 async function selectTopic(name){
@@ -989,14 +1098,14 @@ async function generateFacts(contextText, title, localityHint){
     ];
     state.displayLog = [];
     state.currentTopic = title;
-    state.topicCache[title] = {
+    cacheTopic(title, {
       context: contextText,
       systemPrompt: state.systemPrompt,
       apiMessages: state.messages,
       displayLog: state.displayLog,
       badge, sourceUrl, citations,
       factsText: text
-    };
+    });
     enableChat();
   }catch(err){
     setStatus('Fehler beim Abrufen der Fun Facts: ' + err.message, false);
@@ -1175,6 +1284,7 @@ async function sendFollowUp(){
     if(state.currentTopic && state.topicCache[state.currentTopic]){
       state.topicCache[state.currentTopic].apiMessages = state.messages;
       state.topicCache[state.currentTopic].displayLog = state.displayLog;
+      savePersistedCache();
     }
   }
 }
